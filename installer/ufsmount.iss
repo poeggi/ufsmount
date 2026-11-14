@@ -58,10 +58,6 @@ Name: "{autoprograms}\ufsmount"; Filename: "{app}\ufsmount-tray.exe"; Comment: "
 Filename: "{app}\ufsmount-tray.exe"; Description: "Start ufsmount"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [Code]
-const
-  EnvKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
-  OwnKey = 'SOFTWARE\ufsmount';
-
 var
   LauncherChecked: Boolean;
   RestartNeeded: Boolean;
@@ -189,102 +185,6 @@ begin
     Result := 'WinFsp is still missing or too old after its setup.';
 end;
 
-{ --- PATH --- }
-
-function SameDir(A, B: String): Boolean;
-begin
-  Result := CompareText(RemoveBackslashUnlessRoot(Trim(A)), RemoveBackslashUnlessRoot(B)) = 0;
-end;
-
-function PathHas(Paths, Dir: String): Boolean;
-var
-  P: Integer;
-begin
-  Result := False;
-  while Paths <> '' do begin
-    P := Pos(';', Paths);
-    if P = 0 then begin
-      Result := SameDir(Paths, Dir);
-      exit;
-    end;
-    if SameDir(Copy(Paths, 1, P - 1), Dir) then begin
-      Result := True;
-      exit;
-    end;
-    Delete(Paths, 1, P);
-  end;
-end;
-
-{ Append our folder to the system PATH unless it is there already (system or
-  user PATH). Remember exactly what was appended, for the uninstaller. }
-procedure AddToPath;
-var
-  Paths, UserPaths, Dir, Added: String;
-begin
-  Dir := ExpandConstant('{app}');
-  if not RegQueryStringValue(HKLM, EnvKey, 'Path', Paths) then begin
-    Log('PATH: cannot read it; not changed');
-    exit;
-  end;
-  if PathHas(Paths, Dir) then
-    exit;
-  if RegQueryStringValue(HKCU, 'Environment', 'Path', UserPaths) and PathHas(UserPaths, Dir) then
-    exit;
-  if (Paths = '') or (Paths[Length(Paths)] = ';') then
-    Added := Dir
-  else
-    Added := ';' + Dir;
-  if RegWriteExpandStringValue(HKLM, EnvKey, 'Path', Paths + Added) then
-    RegWriteStringValue(HKLM, OwnKey, 'PathAdded', Added)
-  else
-    Log('PATH: cannot write it');
-end;
-
-{ Paths without the entries for Dir; all other entries stay as they are. }
-function WithoutDir(Paths, Dir: String): String;
-var
-  P: Integer;
-  Part: String;
-  First: Boolean;
-begin
-  Result := '';
-  First := True;
-  while True do begin
-    P := Pos(';', Paths);
-    if P = 0 then
-      Part := Paths
-    else
-      Part := Copy(Paths, 1, P - 1);
-    if not SameDir(Part, Dir) then begin
-      if not First then
-        Result := Result + ';';
-      Result := Result + Part;
-      First := False;
-    end;
-    if P = 0 then
-      break;
-    Delete(Paths, 1, P);
-  end;
-end;
-
-procedure RemoveFromPath;
-var
-  Paths, Added: String;
-  N: Integer;
-begin
-  if not RegQueryStringValue(HKLM, OwnKey, 'PathAdded', Added) then
-    exit;
-  if RegQueryStringValue(HKLM, EnvKey, 'Path', Paths) then begin
-    N := Length(Paths) - Length(Added);
-    if (N >= 0) and (Copy(Paths, N + 1, Length(Added)) = Added) then
-      { Still at the end: take back exactly what was appended. }
-      RegWriteExpandStringValue(HKLM, EnvKey, 'Path', Copy(Paths, 1, N))
-    else
-      RegWriteExpandStringValue(HKLM, EnvKey, 'Path', WithoutDir(Paths, ExpandConstant('{app}')));
-  end;
-  RegDeleteKeyIncludingSubkeys(HKLM, OwnKey);
-end;
-
 { --- setup steps --- }
 
 procedure CurPageChanged(CurPageID: Integer);
@@ -320,8 +220,9 @@ begin
   RunOrWarn(ExpandConstant('{app}\ufsmount-tray.exe'), Params, 'creating the start task');
   if WizardIsTaskSelected('launcher') then
     RunOrWarn(ExpandConstant('{app}\ufsmount.exe'), 'register', 'registering with the WinFsp launcher');
+  { The exe keeps the PATH value's registry type; Pascal script cannot read it. }
   if WizardIsTaskSelected('path') then
-    AddToPath;
+    RunOrWarn(ExpandConstant('{app}\ufsmount-tray.exe'), '--add-to-path', 'adding ufsmount to the PATH');
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -333,5 +234,5 @@ begin
   StopRunning;
   RunHidden(ExpandConstant('{app}\ufsmount-tray.exe'), '--remove-task', Code);
   RunHidden(ExpandConstant('{app}\ufsmount.exe'), 'unregister', Code);
-  RemoveFromPath;
+  RunHidden(ExpandConstant('{app}\ufsmount-tray.exe'), '--remove-from-path', Code);
 end;

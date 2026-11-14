@@ -8,6 +8,7 @@
 
 mod instance;
 pub mod log;
+mod path;
 pub mod sys;
 pub mod task;
 mod ui;
@@ -34,6 +35,8 @@ enum Mode {
     Quit,
     InstallTask { logon: bool },
     RemoveTask,
+    AddToPath,
+    RemoveFromPath,
     Source(PathBuf),
 }
 
@@ -46,6 +49,8 @@ fn parse(args: &[String]) -> Result<Mode, String> {
         ["--install-task"] => Ok(Mode::InstallTask { logon: false }),
         ["--install-task", "--logon"] => Ok(Mode::InstallTask { logon: true }),
         ["--remove-task"] => Ok(Mode::RemoveTask),
+        ["--add-to-path"] => Ok(Mode::AddToPath),
+        ["--remove-from-path"] => Ok(Mode::RemoveFromPath),
         ["--source", path] => Ok(Mode::Source(PathBuf::from(path))),
         _ => Err(format!("unknown arguments: {}", args.join(" "))),
     }
@@ -153,6 +158,25 @@ pub fn main() -> ExitCode {
                 Err(e) => {
                     ::log::error!("install task: {e:#}");
                     eprintln!("install task: {e:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Mode::AddToPath | Mode::RemoveFromPath => {
+            let add = mode == Mode::AddToPath;
+            let result = std::env::current_exe()
+                .map_err(anyhow::Error::from)
+                .and_then(|exe| {
+                    if add {
+                        path::add(&exe)
+                    } else {
+                        path::remove(&exe)
+                    }
+                });
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("PATH: {e:#}");
                     ExitCode::FAILURE
                 }
             }

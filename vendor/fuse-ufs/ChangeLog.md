@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - rufs: a read-only open no longer reads every cylinder group
 - rufs: `inode_read()` past the end of a file returns 0 instead of panicking
 - rufs: timestamps that `SystemTime` cannot hold no longer panic; times before the epoch with nanoseconds are read and written correctly
+- rufs: short symlinks with extattr blocks, and long symlinks that end in a fragment
 
 ## [0.6.0] - 2025-09-27
 

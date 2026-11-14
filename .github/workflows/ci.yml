@@ -176,12 +176,14 @@ jobs:
           # WinFsp stays installed and may add its own entry; ignore that one.
           function Parts($v) { ($v -split '\|', 2)[1] -split ';' | Where-Object { $_ -notlike '*\WinFsp\*' } }
           $after = PathValue
-          $diff = Compare-Object (Parts $pathBefore) (Parts $after)
-          if ($diff -or ($after -split '\|')[0] -ne ($pathBefore -split '\|')[0]) {
-            $diff | Format-Table -AutoSize | Out-String -Width 400 | Write-Host
-            throw 'PATH changed'
-          }
-          Compare-Object ($pathBefore -split ';') ($after -split ';') | Format-Table -AutoSize | Out-String -Width 400 | Write-Host
+          $kb = ($pathBefore -split '\|', 2)[0]
+          $ka = ($after -split '\|', 2)[0]
+          $pb = @(Parts $pathBefore)
+          $pa = @(Parts $after)
+          Write-Host "PATH type before=$kb after=$ka; entries before=$($pb.Count) after=$($pa.Count)"
+          $diff = @(Compare-Object $pb $pa)
+          foreach ($d in $diff) { Write-Host "  $($d.SideIndicator) [$($d.InputObject)]" }
+          if ($diff.Count -gt 0 -or $ka -ne $kb) { throw 'PATH changed' }
           'smoke test passed'
 
       - name: Logs

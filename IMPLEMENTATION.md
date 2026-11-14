@@ -65,6 +65,10 @@ each with a `ChangeLog.md` line and a message fit for an upstream PR. With tests
 - P8 Read-only open skips the per-cylinder-group checks (2596 scattered reads on the target disk,
   and one bad sector would refuse the mount). They protect the allocator, so they stay for read-write.
 - P9 `Info` exposes superblock facts: `clean`, `flags`, `volname`, `fsmnt`, `id`, `size`, `maxsymlinklen`.
+- Follow-ups from the implementation review, also one commit each:
+  out-of-range block helpers return EIO; stricter superblock and inode number checks;
+  directories larger than their allocation are corrupt; backend errors are wrapped
+  (no errno clash with ENOATTR); corrupt extattr areas give EIO; unused entries keep their d_type.
 - Not patched: the `Write` bound on the backend (our reader returns an error). PLAN.md is aligned.
 - Run rufs' tests on Windows after the patches.
 

@@ -1,0 +1,54 @@
+ufsmount - third-party notices
+
+ufsmount is licensed under the GNU Affero General Public License v3.0 or
+later (LICENSE.txt). Source: https://github.com/poeggi/winfsp-ufs
+
+It contains or uses the following third-party software.
+
+-------------------------------------------------------------------------------
+rufs / fuse-ufs (compiled into ufsmount.exe and ufsmount-tray.exe)
+https://github.com/realchonk/fuse-ufs
+
+BSD 2-Clause License
+
+Copyright (c) 2024, Benjamin Stuerz
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+-------------------------------------------------------------------------------
+winfsp-rs (compiled into both executables)
+https://github.com/SnowflakePowered/winfsp-rs
+Copyright SnowflakePowered and contributors.
+License: GNU General Public License v3.0.
+
+-------------------------------------------------------------------------------
+WinFsp - Windows File System Proxy (not included; the setup downloads the
+official installer from its project page when needed)
+https://github.com/winfsp/winfsp
+Copyright (C) Bill Zissimopoulos.
+License: GNU General Public License v3.0 with a FLOSS exception.
+
+-------------------------------------------------------------------------------
+Other Rust crates compiled into both executables are listed in Cargo.lock in
+the source. They are licensed under MIT and/or Apache-2.0; their license
+texts are part of each crate's source on https://crates.io.

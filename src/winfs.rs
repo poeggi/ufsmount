@@ -776,6 +776,28 @@ mod tests {
     }
 
     #[test]
+    fn min_winfsp_matches_the_setup() {
+        let iss = include_str!("../installer/winfsp.iss");
+        let get = |name: &str| -> u32 {
+            let prefix = format!("#define {name} ");
+            iss.lines()
+                .find_map(|l| l.strip_prefix(prefix.as_str()))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        assert_eq!(
+            (
+                get("WinFspMinMajor"),
+                get("WinFspMinMinor"),
+                get("WinFspMinBuild")
+            ),
+            MIN_WINFSP
+        );
+    }
+
+    #[test]
     fn write_access_mask() {
         assert_eq!(WRITE_ACCESS, crate::security::WRITE_RIGHTS);
         // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE

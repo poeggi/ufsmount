@@ -1,5 +1,7 @@
 # winfsp-ufs
 
+<img src="assets/logo.svg" width="96" alt="ufsmount logo">
+
 Mount a FreeBSD UFS2 disk on Windows as a read-only drive.
 `ufsmount.exe` reads the raw disk and serves the files through WinFsp.
 Explorer, copy and robocopy work as on any drive.
@@ -91,6 +93,7 @@ The WinFsp mount test runs with `UFSMOUNT_MOUNT_TEST=1`.
 - WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos.
   https://github.com/winfsp/winfsp
 - [winfsp-rs](https://github.com/SnowflakePowered/winfsp-rs) by SnowflakePowered and contributors (GPL-3.0).
+- The daemon in the logo is a nod to the BSD Daemon by Marshall Kirk McKusick.
 
 ## License
 

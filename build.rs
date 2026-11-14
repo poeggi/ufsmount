@@ -8,4 +8,10 @@ fn main() {
     // Static imports are searched in System32 only, never in the exe folder.
     println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=assets/ufsmount.ico");
+
+    // The logo as the exe icon, plus version info from Cargo.toml.
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon("assets/ufsmount.ico");
+    res.compile().expect("compile the Windows resources");
 }

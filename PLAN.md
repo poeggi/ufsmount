@@ -74,6 +74,7 @@ Status: 1 to 7 done and tested on the real disk (probe, ls, cp, mount, net use).
 8. Installer. Manual install is enough for now.
    - Checks for WinFsp and its version. Points to the official MSI; no bundling while only betas are safe.
    - Copies `ufsmount.exe` and registers it with the launcher.
+   - Uses the logo: `assets/ufsmount.ico` (also the exe icon) and `assets/logo.svg`.
 
 ## Out of scope
 

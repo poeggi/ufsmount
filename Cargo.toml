@@ -27,3 +27,6 @@ lto = "thin"
 
 [dev-dependencies]
 zstd = "0.14.4"
+
+[build-dependencies]
+winresource = "0.1.34"

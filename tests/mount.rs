@@ -54,7 +54,12 @@ fn enabled() -> bool {
 }
 
 fn free_letter() -> char {
-    ('M'..='Z')
+    free_letter_in('M'..='Z')
+}
+
+/// Tests run in parallel; each test uses its own range of letters.
+fn free_letter_in(range: std::ops::RangeInclusive<char>) -> char {
+    range
         .rev()
         .find(|l| !Path::new(&format!("{l}:\\")).exists())
         .expect("no free drive letter")
@@ -205,7 +210,7 @@ fn mount_stop_releases_device() {
     let dev = vol.device().clone();
     let sid = ufsmount::security::current_user_sid().unwrap();
     let sd = ufsmount::security::SecurityDescriptor::read_only_for(&sid).unwrap();
-    let letter = free_letter();
+    let letter = free_letter_in('G'..='L');
     let target = format!("{letter}:");
     let mut m =
         ufsmount::winfs::Mount::start(Arc::new(vol), sd, None, Some(&target), false).unwrap();

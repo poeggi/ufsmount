@@ -48,7 +48,7 @@ Files show up in Explorer and work with any program (copy, robocopy).
 
 ## Milestones
 
-Status: 1 to 7 done and tested on the real disk (probe, ls, cp, mount, net use). 8 is open.
+Status: 1 to 8 done and tested on the real disk.
 
 1. Check the base. Done.
 2. Vendor and patch rufs (each patch a separate commit, fit for upstream).
@@ -71,7 +71,7 @@ Status: 1 to 7 done and tested on the real disk (probe, ls, cp, mount, net use).
    - Compare file lists and checksums against the source tree.
 7. Launcher registration.
    - Register under the WinFsp launcher (like `fsreg.bat`).
-8. Installer. Manual install is enough for now.
+8. Installer and tray app (see `INSTALLER-PLAN.md`).
    - Checks for WinFsp and its version. Points to the official MSI; no bundling while only betas are safe.
    - Copies `ufsmount.exe` and registers it with the launcher.
    - Uses the logo: `assets/ufsmount.ico` (also the exe icon) and `assets/logo.svg`.

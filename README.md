@@ -8,36 +8,48 @@ Explorer, copy and robocopy work as on any drive.
 
 ## Requirements
 
-- Windows 10 or 11, x64.
+- Windows 10 or 11, x64, an administrator account.
 - [WinFsp](https://github.com/winfsp/winfsp/releases) 2.2.26286 (2026 Beta5) or later.
   Older versions have kernel vulnerabilities (CVE-2026-3006 and others).
-- Administrator rights to read a physical disk.
+  The setup installs it if needed.
 
 ## Install
 
-Manual for now:
+1. Download `ufsmount-<version>-setup.exe` from the [releases](../../releases).
+2. Run it. It installs to `C:\Program Files\ufsmount`.
 
-1. Install WinFsp.
-2. Get `ufsmount.exe` from the [releases](../../releases), or build it (see Build).
-3. Copy it to `C:\Program Files\ufsmount\` and add that folder to your PATH.
+The setup is not signed yet:
+
+- SmartScreen warns. Click "More info", then "Run anyway".
+- Smart App Control (Windows 11) blocks it. Then build it yourself, or wait for a signed release.
+- Check the download: `Get-FileHash ufsmount-<version>-setup.exe` must match `SHA256SUMS` of the release.
+
+Silent install: `ufsmount-<version>-setup.exe /VERYSILENT /NORESTART`.
+
+Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
 
 ## Start and stop
 
-Find the disk number with `Get-Disk` (here: 1).
+- Start: Start menu > ufsmount. No UAC prompt.
+- The ufsmount icon appears in the notification area (maybe under the arrow).
+- It mounts every UFS2 file system it finds, starting at U:. Plugged-in disks are mounted too.
+- Right-click the icon: Open or Unmount a drive, Rescan disks, Quit.
+- Quit unmounts everything. Unplugging a disk unmounts it.
+- The setup can start it at sign-in (option "Start ufsmount when I sign in").
+- Log: `C:\ProgramData\ufsmount\tray\tray.log`.
 
-Start, from an elevated prompt:
+## Command line
+
+From an elevated prompt (the setup adds the folder to PATH):
 
 ```
 ufsmount mount PhysicalDrive1 U:
 ```
 
-- U: is there while the command runs. Explorer and all programs see it.
-- Stop: press Ctrl+C in that window, or close it. U: goes away.
-- Unplugging the disk also stops it.
+- Find the disk number with `Get-Disk`.
+- U: is there while the command runs. Ctrl+C or closing the window unmounts it.
 
-## Other commands
-
-Also from an elevated prompt:
+Other commands:
 
 ```
 ufsmount probe PhysicalDrive1
@@ -85,6 +97,9 @@ cargo test
 ```
 
 The WinFsp mount test runs with `UFSMOUNT_MOUNT_TEST=1`.
+
+The setup needs [Inno Setup](https://jrsoftware.org/isinfo.php) 7.1.1:
+`ISCC /DAppVersion=0.2.0 installer\ufsmount.iss`. It goes to `target\installer`.
 
 ## Credits
 

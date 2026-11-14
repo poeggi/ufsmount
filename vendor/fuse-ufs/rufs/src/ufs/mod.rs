@@ -171,28 +171,34 @@ impl<R: Backend> Ufs<R> {
 		sbassert!(sb.sbsize == sb.fsize);
 		sbassert!(sb.cgsize_struct() < sb.bsize as usize);
 
-		let fpg = sb.fpg as u64;
-		let sblkno = sb.sblkno as u64;
-		let fs = sb.fsize as u64;
+		// Reading every cylinder group is slow on large disks, and one bad sector
+		// would refuse the whole file system. Only the allocator uses them.
+		if self.write_enabled() {
+			let fpg = sb.fpg as u64;
+			let sblkno = sb.sblkno as u64;
+			let fs = sb.fsize as u64;
 
-		// check that all superblocks are ok.
-		for i in 0..sb.ncg {
-			let addr = (i as u64 * fpg + sblkno) * fs;
-			let csb: Superblock = self.file.decode_at(addr).unwrap();
-			if csb.magic != FS_UFS2_MAGIC {
-				log::error!("CG{i} has invalid superblock magic: {:x}", csb.magic);
-				return Err(err!(EIO));
+			// check that all superblocks are ok.
+			for i in 0..sb.ncg {
+				let addr = (i as u64 * fpg + sblkno) * fs;
+				let csb: Superblock = self.file.decode_at(addr).unwrap();
+				if csb.magic != FS_UFS2_MAGIC {
+					log::error!("CG{i} has invalid superblock magic: {:x}", csb.magic);
+					return Err(err!(EIO));
+				}
 			}
-		}
 
-		// check that all cylgroups are ok.
-		for i in 0..self.superblock.ncg {
-			let addr = self.cg_addr(i as u64);
-			let cg: CylGroup = self.file.decode_at(addr).unwrap();
-			if cg.magic != CG_MAGIC {
-				log::error!("CG{i} has invalid cg magic: {:x}", cg.magic);
-				return Err(err!(EIO));
+			// check that all cylgroups are ok.
+			for i in 0..self.superblock.ncg {
+				let addr = self.cg_addr(i as u64);
+				let cg: CylGroup = self.file.decode_at(addr).unwrap();
+				if cg.magic != CG_MAGIC {
+					log::error!("CG{i} has invalid cg magic: {:x}", cg.magic);
+					return Err(err!(EIO));
+				}
 			}
+		} else {
+			log::info!("cylinder groups not checked (read-only)");
 		}
 		log::info!("OK");
 		Ok(())

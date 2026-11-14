@@ -18,14 +18,24 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  WINFSP_URL: https://github.com/winfsp/winfsp/releases/download/v2.2B5/winfsp-2.2.26286.msi
-  WINFSP_SHA256: 293FFB9BCC0B625C85079FE85FA77F8FE98170ABA51A02AC9C83D58F6C3B0E2F
+  INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe
+  INNO_SHA256: 8A5A6711C3766A6E5FB74F280BA0E3551E719CE94538D901FDBD1F8F9920B3F0
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF -like 'refs/tags/v*' -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "tag $env:GITHUB_REF_NAME does not match the Cargo version $v"
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Rust toolchain
         run: |
@@ -43,9 +53,12 @@ jobs:
       - name: Install WinFsp
         shell: pwsh
         run: |
-          Invoke-WebRequest $env:WINFSP_URL -OutFile winfsp.msi
+          $iss = Get-Content installer\winfsp.iss
+          $url = ($iss | Select-String '#define WinFspUrl "(.+)"').Matches[0].Groups[1].Value
+          $sha = ($iss | Select-String '#define WinFspSha256 "(.+)"').Matches[0].Groups[1].Value
+          Invoke-WebRequest $url -OutFile winfsp.msi
           $hash = (Get-FileHash winfsp.msi -Algorithm SHA256).Hash
-          if ($hash -ne $env:WINFSP_SHA256) { throw "WinFsp hash mismatch: $hash" }
+          if ($hash -ne $sha) { throw "WinFsp hash mismatch: $hash" }
           $p = Start-Process msiexec -ArgumentList '/i', 'winfsp.msi', '/qn', '/norestart' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "msiexec failed: $($p.ExitCode)" }
 
@@ -62,14 +75,108 @@ jobs:
       - name: Release build
         run: cargo build --release --locked
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:INNO_URL -OutFile inno.exe
+          $hash = (Get-FileHash inno.exe -Algorithm SHA256).Hash
+          if ($hash -ne $env:INNO_SHA256) { throw "Inno Setup hash mismatch: $hash" }
+          $sig = Get-AuthenticodeSignature inno.exe
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Pyrsys B\.V\.') {
+            throw "Inno Setup signature: $($sig.Status) $($sig.SignerCertificate.Subject)"
+          }
+          $p = Start-Process .\inno.exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/CURRENTUSER', "/DIR=$env:RUNNER_TEMP\inno" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Inno Setup install failed: $($p.ExitCode)" }
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\inno\ISCC.exe" /Q "/DAppVersion=${{ steps.version.outputs.version }}" installer\ufsmount.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
+
       - uses: actions/upload-artifact@v7
         with:
           name: ufsmount
-          path: target/release/ufsmount.exe
+          path: |
+            target/release/ufsmount.exe
+            target/release/ufsmount-tray.exe
+            target/installer/ufsmount-*-setup.exe
+
+  smoke:
+    # A fresh runner without WinFsp: the setup has to download it.
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ufsmount
+          path: dist
+
+      - name: Install, use and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $envKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+          function PathValue { $k = Get-Item $envKey; "$($k.GetValueKind('Path'))|$($k.GetValue('Path', $null, 'DoNotExpandEnvironmentNames'))" }
+          $pathBefore = PathValue
+          $app = 'C:\Program Files\ufsmount'
+          $link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\ufsmount.lnk"
+          if (Test-Path 'HKLM:\SOFTWARE\WOW6432Node\WinFsp') { throw 'WinFsp is preinstalled; the download path is not tested' }
+
+          $setup = (Get-ChildItem dist -Recurse -Filter 'ufsmount-*-setup.exe').FullName
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$env:RUNNER_TEMP\setup.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "setup failed: $($p.ExitCode)" }
+
+          if (-not (Test-Path 'HKLM:\SOFTWARE\WOW6432Node\WinFsp')) { throw 'WinFsp was not installed' }
+          foreach ($f in 'ufsmount.exe', 'ufsmount-tray.exe', 'LICENSE.txt', 'THIRD-PARTY-NOTICES.txt') {
+            if (-not (Test-Path "$app\$f")) { throw "missing $f" }
+          }
+          if (-not (Test-Path $link)) { throw 'missing Start menu link' }
+          $uninst = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' | Get-ItemProperty | Where-Object DisplayName -eq 'ufsmount'
+          if (-not $uninst) { throw 'missing uninstall entry' }
+          if ((PathValue) -notlike "*$app*") { throw 'PATH was not extended' }
+
+          [xml]$task = schtasks.exe /Query /TN ufsmount-tray /XML
+          if ($LASTEXITCODE -ne 0) { throw 'missing task' }
+          $s = $task.Task.Settings
+          if ($s.ExecutionTimeLimit -ne 'PT0S' -or $s.Priority -ne '4' -or $s.DisallowStartIfOnBatteries -ne 'false' -or $s.MultipleInstancesPolicy -ne 'IgnoreNew') { throw 'task settings' }
+          if ($task.Task.Actions.Exec.Command -ne "$app\ufsmount-tray.exe" -or $task.Task.Actions.Exec.Arguments -ne '--from-task') { throw 'task action' }
+          if ($task.Task.Principals.Principal.RunLevel -ne 'HighestAvailable') { throw 'task run level' }
+
+          zstd -q -d vendor/fuse-ufs/resources/ufs-little.img.zst -o "$env:RUNNER_TEMP\ufs.img"
+          Start-Process "$app\ufsmount-tray.exe" -ArgumentList '--source', "$env:RUNNER_TEMP\ufs.img"
+          $deadline = (Get-Date).AddSeconds(60)
+          while (-not (Test-Path 'U:\file1') -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          if ((Get-Content 'U:\file1' -Raw) -ne "This is a simple file.`n") { throw 'U:\file1 not readable' }
+          $p = Start-Process "$app\ufsmount-tray.exe" -ArgumentList '--quit' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "--quit failed: $($p.ExitCode)" }
+          if (Test-Path 'U:\') { throw 'U: still mounted' }
+
+          $u = ($uninst.UninstallString -replace '"', '')
+          $p = Start-Process $u -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$env:RUNNER_TEMP\uninst.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstall failed: $($p.ExitCode)" }
+          Start-Sleep -Seconds 3
+          foreach ($left in $app, $link, "$env:ProgramData\ufsmount") {
+            if (Test-Path $left) { throw "left behind: $left" }
+          }
+          schtasks.exe /Query /TN ufsmount-tray 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'task left behind' }
+          if (Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' | Get-ItemProperty | Where-Object DisplayName -eq 'ufsmount') { throw 'uninstall entry left behind' }
+          if ((PathValue) -ne $pathBefore) { throw "PATH changed: $(PathValue)" }
+          'smoke test passed'
+
+      - name: Logs
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-Content "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\uninst.log" -ErrorAction SilentlyContinue | Select-Object -Last 120
+          Get-Content "$env:ProgramData\ufsmount\tray\tray.log" -ErrorAction SilentlyContinue
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -77,11 +184,16 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: ufsmount
+          path: dist
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          sha256sum ufsmount.exe > ufsmount.exe.sha256
-          gh release create "$GITHUB_REF_NAME" ufsmount.exe ufsmount.exe.sha256 \
+          mkdir out
+          find dist -type f \( -name ufsmount.exe -o -name 'ufsmount-*-setup.exe' \) -exec cp {} out/ \;
+          cd out
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" * \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

@@ -17,7 +17,7 @@ impl Header {
 		assert!(dname.len() <= UFS_MAXNAMELEN);
 		let mut name = [0u8; UFS_MAXNAMELEN + 1];
 		name[0..dname.len()].copy_from_slice(dname);
-		let reclen = ((4 + 2 + 1 + 1 + name.len() + 3) & !3) as u16;
+		let reclen = dirsiz(dname.len() as u8);
 		Self {
 			inr,
 			reclen,
@@ -108,8 +108,14 @@ impl Header {
 	}
 
 	fn minlen(&self) -> u16 {
-		(4 + 2 + 1 + 1 + (self.namelen as u16) + 3) & !3
+		dirsiz(self.namelen)
 	}
+}
+
+/// Size of a record for a name of `namelen` bytes: the header, the name and its NUL,
+/// rounded up to 4 bytes (`DIRECTSIZ` in FreeBSD).
+fn dirsiz(namelen: u8) -> u16 {
+	(8 + namelen as u16 + 1 + 3) & !3
 }
 
 fn readdir_block<T>(
@@ -502,5 +508,37 @@ impl<R: Backend> Ufs<R> {
 
 		let ino = self.read_inode(inr)?;
 		Ok(ino.as_attr(inr))
+	}
+}
+
+#[cfg(test)]
+mod t {
+	use super::*;
+
+	fn inr(n: u32) -> InodeNum {
+		// SAFETY: only used to build test records.
+		unsafe { InodeNum::new(n) }
+	}
+
+	fn reclen_at(block: &[u8], pos: usize, big: bool) -> u16 {
+		let b = [block[pos + 4], block[pos + 5]];
+		if big {
+			u16::from_be_bytes(b)
+		} else {
+			u16::from_le_bytes(b)
+		}
+	}
+
+	/// A record holds its name and a NUL, rounded up to 4 bytes.
+	#[test]
+	fn record_sizes() {
+		assert_eq!(dirsiz(1), 12);
+		assert_eq!(dirsiz(3), 12);
+		assert_eq!(dirsiz(4), 16);
+		assert_eq!(dirsiz(255), 264);
+
+		let block = newdir(inr(2), inr(5), Config::little()).unwrap();
+		assert_eq!(reclen_at(&block, 0, false), 12);
+		assert_eq!(reclen_at(&block, 12, false), (DIRBLKSIZE - 12) as u16);
 	}
 }

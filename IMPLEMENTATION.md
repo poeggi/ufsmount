@@ -43,33 +43,26 @@ vendor/fuse-ufs/      upstream fuse-ufs, git subtree, pinned to 36bc35a
 One commit per patch, only under `vendor/fuse-ufs`, formatted with nightly rustfmt (upstream config),
 each with a `ChangeLog.md` line and a message fit for an upstream PR. With tests where possible.
 
-- P1 Non-Unix targets.
-  - Internals work on byte names: `Header::name() -> &[u8]`, `check_name_is_legal(&[u8])`.
-  - Byte APIs for reading: `dir_iter_bytes`, `dir_lookup_bytes`, xattr list/read by bytes.
-  - The existing `OsStr` APIs stay as thin wrappers, `cfg(unix)`.
-  - `BlockReader::open` / `Ufs::open` stay on all targets: block size from `blksize()` on unix, else 4096.
-  - `ENOATTR` gets a value on other targets (`libc::ENODATA` if libc has it for windows-msvc).
-- P2 Directory entries with inode 0. FreeBSD zeroes `d_ino` of a deleted first entry in a 512-byte chunk
-  and keeps `reclen`. rufs stops the chunk there and loses the live entries behind it.
-  Skip such entries; only `reclen == 0` or a decode error ends the chunk. Unit test with a built block.
-- P3 No panics on bad disk data, `EIO` instead:
-  directory reclen underflow, invalid `d_type`, `DT_UNKNOWN` (resolve the type from the inode),
-  directory size assert, inode mode with an unknown type (checked in `read_inode`),
-  `Inode::size` on special files, block pointers outside the file system (checked, with `checked_mul`),
-  `inode_find_block` / `inode_get_block_size` out of bounds, `check()` unwraps, `info()` overflow.
-- P4 Symlinks: short vs long by `size < maxsymlinklen` (as FreeBSD), length bounded by the block size,
-  no `blocks <= 8` assert.
-- P5 Reads at or past EOF return 0.
-- P6 Timestamps saturate instead of panicking (`i64::MIN`, values outside `SystemTime`).
-- P7 The decoder keeps the backend's I/O error instead of replacing it with "failed to decode".
-- P8 Read-only open skips the per-cylinder-group checks (2596 scattered reads on the target disk,
-  and one bad sector would refuse the mount). They protect the allocator, so they stay for read-write.
-- P9 `Info` exposes superblock facts: `clean`, `flags`, `volname`, `fsmnt`, `id`, `size`, `maxsymlinklen`.
-- Follow-ups from the implementation review, also one commit each:
-  out-of-range block helpers return EIO; stricter superblock and inode number checks;
-  directories larger than their allocation are corrupt; backend errors are wrapped
-  (no errno clash with ENOATTR); corrupt extattr areas give EIO; unused entries keep their d_type.
-- Not patched: the `Write` bound on the backend (our reader returns an error). PLAN.md is aligned.
+The series, in order (each one passes rufs' tests, clippy and the Linux build):
+
+1. Build on non-Unix targets: names as bytes, `dir_iter_bytes`, `dir_lookup_bytes`.
+2. Keep the cause of backend I/O errors (`BlockReader` wraps them; no errno clash with ENOATTR).
+3. Check cylinder groups only on a read-write open.
+4. More superblock facts in `Info` (`frags`, `clean`, `flags`, `id`, `volname`, `fsmnt`).
+5. `inode_read()` past EOF returns 0.
+6. Out-of-range timestamps do not panic; times before the epoch are right.
+7. Short vs long symlinks by size, as FreeBSD.
+8. More superblock checks; `sbsize` no longer has to equal `fsize`.
+9. Invalid inode numbers and unknown file types give EIO.
+10. Device nodes, fifos and sockets have no data.
+11. Block pointers are checked against the file system size (read path).
+12. Corrupt extattr areas give EIO.
+13. Directory records leave room for the NUL (`DIRECTSIZ`).
+14. Unused directory entries (`d_ino` 0) do not end the chunk.
+15. Directory records and chunks are validated; a read-only listing skips a corrupt chunk.
+16. `DT_UNKNOWN` entries take their type from the inode.
+
+- Not patched: the `Write` bound on the backend (our reader returns an error).
 - Run rufs' tests on Windows after the patches.
 
 ## Step 3: device and partitions (`device.rs`, `partition.rs`)
@@ -247,5 +240,4 @@ ufsmount -u <\ufs\Instance> -m <X:|""> -U <DOMAIN\user>   (launcher mode)
 
 ## Commits
 
-Local commits on `main`, nothing pushed: one per rufs patch, then device/partition, volume + CLI,
-WinFsp mount, launcher mode, tests, README + CI.
+On `main`: the rufs patches first, one commit each, then the commits of our crate.

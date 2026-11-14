@@ -17,8 +17,11 @@ use windows::Win32::System::RemoteDesktop::{
 use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_PROCESS_LOGON_FLAGS, CreateProcessW, CreateProcessWithTokenW,
-    GetExitCodeProcess, INFINITE, OpenProcess, OpenProcessToken, PROCESS_CREATION_FLAGS,
-    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW, WaitForSingleObject,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess, OpenProcessToken,
+    PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, PROCESS_CREATE_PROCESS, PROCESS_CREATION_FLAGS,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -80,6 +83,7 @@ fn quote(s: &str) -> String {
 
 /// Run `exe` (a full path) with `args` and no window, wait, return its exit code.
 pub fn run_hidden(exe: &Path, args: &str) -> anyhow::Result<u32> {
+    anyhow::ensure!(exe.is_absolute(), "not a full path: {}", exe.display());
     let mut cmd: Vec<u16> = format!("{} {args}", quote(&exe.to_string_lossy()))
         .encode_utf16()
         .chain(Some(0))
@@ -124,15 +128,88 @@ impl Drop for Handle {
 }
 
 /// Open `path` in Explorer as the non-elevated user: explorer.exe by full path,
-/// started with the token of the desktop shell.
+/// with the token of the desktop shell. Without the Secondary Logon service the
+/// shell is made the parent of the new process instead.
 pub fn open_unelevated(path: &str) -> anyhow::Result<()> {
-    // SAFETY: plain Win32 calls; every handle is owned by a guard.
-    unsafe {
+    // SAFETY: plain calls.
+    let pid = unsafe {
         let shell = GetShellWindow();
         anyhow::ensure!(!shell.is_invalid(), "no desktop shell");
         let mut pid = 0u32;
         GetWindowThreadProcessId(shell, Some(&mut pid));
-        anyhow::ensure!(pid != 0, "no desktop shell process");
+        pid
+    };
+    anyhow::ensure!(pid != 0, "no desktop shell process");
+    let exe = windows_dir().join("explorer.exe");
+    anyhow::ensure!(exe.is_absolute(), "no Windows folder");
+    let cmd = format!("{} {}", quote(&exe.to_string_lossy()), quote(path));
+    match start_with_shell_token(pid, &exe, &cmd) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            log::info!("shell token: {e:#}; trying the shell as parent");
+            start_as_child_of(pid, &exe, &cmd)
+        }
+    }
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+fn start_as_child_of(pid: u32, exe: &Path, cmd: &str) -> anyhow::Result<()> {
+    let mut cmd = wide(cmd);
+    // SAFETY: the attribute list lives in `buf` until it is deleted; every
+    // handle is owned by a guard.
+    unsafe {
+        let parent = Handle(OpenProcess(PROCESS_CREATE_PROCESS, false, pid)?);
+        let mut size = 0usize;
+        let _ = InitializeProcThreadAttributeList(None, 1, None, &mut size);
+        let mut buf = vec![0u8; size];
+        let list = LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_mut_ptr().cast());
+        InitializeProcThreadAttributeList(Some(list), 1, None, &mut size)?;
+        let result = (|| -> anyhow::Result<()> {
+            UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_PARENT_PROCESS as usize,
+                Some((&parent.0 as *const HANDLE).cast()),
+                size_of::<HANDLE>(),
+                None,
+                None,
+            )?;
+            let si = STARTUPINFOEXW {
+                StartupInfo: STARTUPINFOW {
+                    cb: size_of::<STARTUPINFOEXW>() as u32,
+                    ..Default::default()
+                },
+                lpAttributeList: list,
+            };
+            let mut pi = PROCESS_INFORMATION::default();
+            CreateProcessW(
+                &HSTRING::from(exe.as_os_str()),
+                Some(PWSTR(cmd.as_mut_ptr())),
+                None,
+                None,
+                false,
+                EXTENDED_STARTUPINFO_PRESENT,
+                None,
+                PCWSTR::null(),
+                &si.StartupInfo,
+                &mut pi,
+            )?;
+            let _ = CloseHandle(pi.hThread);
+            let _ = CloseHandle(pi.hProcess);
+            Ok(())
+        })();
+        DeleteProcThreadAttributeList(list);
+        result
+    }
+}
+
+fn start_with_shell_token(pid: u32, exe: &Path, cmd: &str) -> anyhow::Result<()> {
+    let mut cmd = wide(cmd);
+    // SAFETY: plain Win32 calls; every handle is owned by a guard.
+    unsafe {
         let proc = Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)?);
         let mut tok = HANDLE::default();
         OpenProcessToken(proc.0, TOKEN_DUPLICATE, &mut tok)?;
@@ -151,11 +228,6 @@ pub fn open_unelevated(path: &str) -> anyhow::Result<()> {
             &mut dup,
         )?;
         let dup = Handle(dup);
-        let exe = windows_dir().join("explorer.exe");
-        let mut cmd: Vec<u16> = format!("{} {}", quote(&exe.to_string_lossy()), quote(path))
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
         let si = STARTUPINFOW {
             cb: size_of::<STARTUPINFOW>() as u32,
             ..Default::default()

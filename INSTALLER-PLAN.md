@@ -33,7 +33,8 @@ Reading a physical disk and a global drive letter need admin rights.
   2. The task exists: run it, wait up to 5 s for the tray to come up.
   3. Otherwise, or on timeout: relaunch our own exe with "runas" (UAC). This also serves standard users.
 - `--from-task` and not elevated (standard user): exit at once, no relaunch. The starter then falls back to UAC.
-- The elevated tray refuses to run from an install folder that is not admin-only (`check_admin_only`).
+- The task-started tray refuses to run from an install folder that is not admin-only (`check_admin_only`).
+  A tray started elevated by hand (UAC prompt, admin prompt) had the user's consent.
 - Rules for the elevated process: no environment variables for paths (known-folder API, `GetSystemDirectory`),
   no `RUST_LOG`, no ShellExecute. "Open" starts `explorer.exe` by full path with the shell's (non-elevated) token.
 - File security on the mounts: read for SYSTEM, Administrators and the session user (not the process user).

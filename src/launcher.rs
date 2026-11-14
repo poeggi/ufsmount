@@ -5,7 +5,7 @@
 //! SYSTEM. Its arguments come from whoever may talk to the launcher, so they
 //! are checked strictly.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use windows::Win32::System::Registry::{
@@ -105,12 +105,6 @@ fn log_dir() -> anyhow::Result<PathBuf> {
     Ok(program_data()?.join("ufsmount"))
 }
 
-/// Only SYSTEM and Administrators may use the folder: the launcher writes its
-/// logs there as SYSTEM.
-fn admin_only_dir(dir: &Path) -> anyhow::Result<()> {
-    secure_dir(dir, ADMIN_ONLY_DIR)
-}
-
 fn set_sz(key: HKEY, name: &str, value: &str) -> anyhow::Result<()> {
     let data: Vec<u8> = value
         .encode_utf16()
@@ -135,9 +129,10 @@ pub fn register() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}. Install ufsmount.exe under Program Files first."))?;
 
     let base = log_dir()?;
-    admin_only_dir(&base)?;
+    // Only SYSTEM and Administrators: the launcher writes its logs there as SYSTEM.
+    secure_dir(&base, ADMIN_ONLY_DIR)?;
     let logs = base.join("log");
-    admin_only_dir(&logs)?;
+    secure_dir(&logs, ADMIN_ONLY_DIR)?;
 
     let mut key = HKEY::default();
     // SAFETY: creating a registry key with valid out pointers.

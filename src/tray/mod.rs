@@ -23,6 +23,9 @@ use crate::security::{SecurityDescriptor, is_elevated};
 
 /// Exit code of a task-started tray without admin rights (standard user).
 const EXIT_NOT_ELEVATED: u8 = 2;
+/// Exit code for unknown arguments. No message box: the installer runs older
+/// trays, which must never block on a newer argument.
+const EXIT_USAGE: u8 = 64;
 
 #[derive(Debug, PartialEq)]
 enum Mode {
@@ -111,7 +114,10 @@ pub fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).filter(|a| !a.is_empty()).collect();
     let mode = match parse(&args) {
         Ok(m) => m,
-        Err(e) => return fail(&e),
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(EXIT_USAGE);
+        }
     };
     match mode {
         Mode::Start => start(),
@@ -125,7 +131,13 @@ pub fn main() -> ExitCode {
             }
             run_tray(None)
         }
-        Mode::Source(path) => run_tray(Some(path)),
+        Mode::Source(path) => {
+            if !is_elevated() {
+                eprintln!("--source needs administrator rights");
+                return ExitCode::FAILURE;
+            }
+            run_tray(Some(path))
+        }
         Mode::Quit => match instance::request_quit(Duration::from_secs(15)) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE,
@@ -140,6 +152,7 @@ pub fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     ::log::error!("install task: {e:#}");
+                    eprintln!("install task: {e:#}");
                     ExitCode::FAILURE
                 }
             }

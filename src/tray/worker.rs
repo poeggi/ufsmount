@@ -29,6 +29,9 @@ const MAX_MOUNTS: usize = 8;
 const MAX_DISK: u32 = 32;
 const DEBOUNCE: Duration = Duration::from_millis(1500);
 const WATCH_EVERY: Duration = Duration::from_secs(2);
+/// A disk that gave read errors while probing (not ready yet) is probed again.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
+const RETRIES: u8 = 3;
 
 pub enum Cmd {
     /// Probe disks that are not mounted. `manual` also forgets user unmounts.
@@ -157,14 +160,27 @@ struct Worker {
     no_ufs: HashSet<u32>,
     notes: Vec<Note>,
     status: String,
+    last_warning: Option<String>,
+    cap_warned: bool,
+    retry: bool,
+    retries_left: u8,
 }
 
 impl Worker {
     fn note(&mut self, title: &str, text: String, warn: bool) {
         if warn {
             log::warn!("{title}: {text}");
+            self.last_warning = Some(format!("{title}: {text}"));
         }
         self.notes.push((title.to_string(), text, warn));
+    }
+
+    fn update_status(&mut self) {
+        self.status = match (&self.last_warning, self.actives.is_empty()) {
+            (Some(w), _) => w.clone(),
+            (None, true) => "no UFS disk mounted".to_string(),
+            (None, false) => String::new(),
+        };
     }
 
     fn publish(&mut self) {
@@ -205,6 +221,9 @@ impl Worker {
             return;
         }
         if self.actives.len() >= MAX_MOUNTS {
+            if std::mem::replace(&mut self.cap_warned, true) {
+                return;
+            }
             self.note(
                 "Too many file systems",
                 format!(
@@ -287,7 +306,13 @@ impl Worker {
         };
         let ufs: Vec<Candidate> = cands.into_iter().filter(|c| c.ufs2().is_some()).collect();
         if ufs.is_empty() {
-            self.no_ufs.insert(n);
+            // Read errors (a disk still spinning up) are no proof of "no UFS".
+            if dev.take_last_error().is_none() && !dev.is_gone() {
+                self.no_ufs.insert(n);
+            } else {
+                log::info!("PhysicalDrive{n}: read errors while probing");
+                self.retry = true;
+            }
             return;
         }
         for c in &ufs {
@@ -297,24 +322,31 @@ impl Worker {
         }
     }
 
-    fn scan(&mut self) {
+    /// Probe the disks. An automatic scan skips disks that have a mount or are
+    /// known to hold no UFS; a manual one probes all (mounts are deduplicated).
+    fn scan(&mut self, manual: bool) {
         if let Some(path) = self.source.clone() {
             if self.actives.is_empty() {
                 self.scan_image(path);
             }
-        } else {
-            for n in 0..MAX_DISK {
-                if self.no_ufs.contains(&n) || self.actives.iter().any(|a| a.disk == Some(n)) {
-                    continue;
-                }
-                self.scan_disk(n);
-            }
+            return;
         }
-        self.status = if self.actives.is_empty() {
-            "no UFS disk mounted".to_string()
-        } else {
-            String::new()
-        };
+        for n in 0..MAX_DISK {
+            if !manual
+                && (self.no_ufs.contains(&n) || self.actives.iter().any(|a| a.disk == Some(n)))
+            {
+                continue;
+            }
+            self.scan_disk(n);
+        }
+    }
+
+    /// After a disk went away: forget what was noted about disk numbers that are
+    /// gone, so the disk is probed (and mounted) again when it comes back.
+    fn forget_gone_disks(&mut self) {
+        let present = |n: u32| Device::open(&Source::PhysicalDrive(n), None).is_ok();
+        self.no_ufs.retain(|&n| present(n));
+        self.unmounted.retain(|k| k.0 == u32::MAX || present(k.0));
     }
 
     fn scan_image(&mut self, path: PathBuf) {
@@ -360,7 +392,7 @@ impl Worker {
     }
 
     fn run(mut self, rx: Receiver<Cmd>) {
-        self.scan();
+        self.scan(false);
         if self.actives.is_empty() && self.notes.is_empty() {
             self.note(
                 "ufsmount",
@@ -368,9 +400,16 @@ impl Worker {
                 false,
             );
         }
+        self.update_status();
         self.publish();
         let mut rescan_at: Option<Instant> = None;
         loop {
+            if std::mem::take(&mut self.retry) && self.retries_left > 0 {
+                self.retries_left -= 1;
+                rescan_at = Some(Instant::now() + RETRY_AFTER);
+            }
+            // The worker holds a sender itself, so the channel never closes;
+            // it ends on Cmd::Quit only.
             let cmd = match rescan_at {
                 Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
                     Ok(c) => c,
@@ -378,11 +417,11 @@ impl Worker {
                         rescan_at = None;
                         Cmd::Rescan { manual: false }
                     }
-                    Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Disconnected) => return,
                 },
                 None => match rx.recv() {
                     Ok(c) => c,
-                    Err(_) => break,
+                    Err(_) => return,
                 },
             };
             match cmd {
@@ -390,18 +429,23 @@ impl Worker {
                     if manual {
                         self.unmounted.clear();
                         self.no_ufs.clear();
+                        self.last_warning = None;
+                        self.cap_warned = false;
+                        self.retries_left = RETRIES;
                     }
                     let before = self.actives.len();
-                    self.scan();
+                    self.scan(manual);
                     if manual && self.actives.len() == before && self.notes.is_empty() {
                         self.note("ufsmount", "No new UFS file system found.".into(), false);
                     }
                 }
-                Cmd::Arrived => rescan_at = Some(Instant::now() + DEBOUNCE),
+                Cmd::Arrived => {
+                    self.retries_left = RETRIES;
+                    rescan_at = Some(Instant::now() + DEBOUNCE);
+                }
                 Cmd::Removed => {
-                    self.unmounted.clear();
-                    self.no_ufs.clear();
                     self.check_alive();
+                    self.forget_gone_disks();
                 }
                 Cmd::Unmount(id) => {
                     if let Some(a) = self.take(id) {
@@ -418,15 +462,8 @@ impl Worker {
                     return;
                 }
             }
-            if self.actives.is_empty() && self.status.is_empty() {
-                self.status = "no UFS disk mounted".to_string();
-            } else if !self.actives.is_empty() {
-                self.status.clear();
-            }
+            self.update_status();
             self.publish();
-        }
-        for a in std::mem::take(&mut self.actives) {
-            a.stop();
         }
     }
 }
@@ -477,6 +514,10 @@ pub fn spawn(
             no_ufs: HashSet::new(),
             notes: Vec::new(),
             status: String::new(),
+            last_warning: None,
+            cap_warned: false,
+            retry: false,
+            retries_left: RETRIES,
         }
         .run(rx)
     });

@@ -18,8 +18,10 @@ use windows::Win32::Security::{
     PSECURITY_DESCRIPTOR, PSID, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
     TokenElevation, TokenUser,
 };
-use windows::Win32::Security::{PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW};
-use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+use windows::Win32::Security::{
+    PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, SetFileSecurityW,
+};
+use windows::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
@@ -368,18 +370,28 @@ pub fn program_data() -> anyhow::Result<PathBuf> {
 }
 
 /// Make `dir` a real folder owned by Administrators with the protected DACL of
-/// `sddl`. An existing folder is taken over; a junction or symlink is refused,
-/// because elevated code writes there.
+/// `sddl`. Elevated code writes there, so nobody else may have prepared it or
+/// its contents: a new folder gets its security at creation; an existing one is
+/// kept only if it is admin-only already, else it is emptied and created anew.
+/// A junction or symlink is refused.
 pub fn secure_dir(dir: &Path, sddl: &str) -> anyhow::Result<()> {
-    match std::fs::symlink_metadata(dir) {
-        Ok(meta) => anyhow::ensure!(
-            meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
-            "{} is not a plain folder; remove it and try again",
-            dir.display()
-        ),
-        Err(_) => std::fs::create_dir(dir)?,
-    }
     let sd = SecurityDescriptor::from_sddl(sddl)?;
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) => {
+            anyhow::ensure!(
+                meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
+                "{} is not a plain folder; remove it and try again",
+                dir.display()
+            );
+            if let Err(e) = check_admin_only(dir) {
+                log::warn!("{e:#}; creating it anew");
+                std::fs::remove_dir_all(dir)
+                    .map_err(|e| anyhow::anyhow!("cannot remove {}: {e}", dir.display()))?;
+                return create_dir_with(dir, &sd);
+            }
+        }
+        Err(_) => return create_dir_with(dir, &sd),
+    }
     // SAFETY: sd outlives the call.
     unsafe {
         SetFileSecurityW(
@@ -393,6 +405,17 @@ pub fn secure_dir(dir: &Path, sddl: &str) -> anyhow::Result<()> {
     .ok()
     .map_err(|e| anyhow::anyhow!("cannot secure {}: {e}", dir.display()))?;
     Ok(())
+}
+
+fn create_dir_with(dir: &Path, sd: &SecurityDescriptor) -> anyhow::Result<()> {
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd.as_psd().0,
+        bInheritHandle: false.into(),
+    };
+    // SAFETY: sa and sd live through the call.
+    unsafe { CreateDirectoryW(&HSTRING::from(dir.as_os_str()), Some(&sa)) }
+        .map_err(|e| anyhow::anyhow!("cannot create {}: {e}", dir.display()))
 }
 
 /// Remove `dir` and everything below it. A junction or symlink at `dir` is refused.

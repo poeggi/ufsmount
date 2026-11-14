@@ -76,16 +76,33 @@ impl Instance {
                 Err(e) if is_denied(&e) => return Ok(None),
                 Err(e) => anyhow::bail!("cannot create the instance mutex: {e}"),
             };
-            let quit = CreateEventW(Some(&attributes(&qsd)), false, false, QUIT);
-            let show = CreateEventW(Some(&attributes(&ssd)), false, false, SHOW);
+            // An event that exists already was made by someone else, with a DACL of
+            // their choice: refuse it.
+            let new_event = |sd: &SecurityDescriptor, name: PCWSTR| match CreateEventW(
+                Some(&attributes(sd)),
+                false,
+                false,
+                name,
+            ) {
+                Ok(h) if GetLastError() == ERROR_ALREADY_EXISTS => {
+                    let _ = CloseHandle(h);
+                    None
+                }
+                Ok(h) => Some(h),
+                Err(_) => None,
+            };
+            let quit = new_event(&qsd, QUIT);
+            let show = new_event(&ssd, SHOW);
             match (quit, show) {
-                (Ok(quit), Ok(show)) => Ok(Some(Instance { mutex, quit, show })),
+                (Some(quit), Some(show)) => Ok(Some(Instance { mutex, quit, show })),
                 (q, s) => {
-                    for h in [q.as_ref().ok(), s.as_ref().ok()].into_iter().flatten() {
-                        let _ = CloseHandle(*h);
+                    for h in [q, s].into_iter().flatten() {
+                        let _ = CloseHandle(h);
                     }
                     let _ = CloseHandle(mutex);
-                    anyhow::bail!("cannot create the tray events")
+                    anyhow::bail!(
+                        "cannot create the tray events; another program may hold their names"
+                    )
                 }
             }
         }

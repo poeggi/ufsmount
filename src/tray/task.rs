@@ -2,6 +2,7 @@
 //! The scheduled task that starts the tray elevated without a UAC prompt, and
 //! the tray's folders under ProgramData.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::sys::{run_hidden, session_user, system_dir};
@@ -11,6 +12,8 @@ use crate::security::{
 };
 
 pub const TASK_NAME: &str = "ufsmount-tray";
+
+const SYSTEM_SID: &str = "S-1-5-18";
 
 /// The argument the task passes. A tray started with it takes no other input.
 pub const FROM_TASK: &str = "--from-task";
@@ -128,11 +131,26 @@ pub fn install(logon: bool) -> anyhow::Result<()> {
     let exe = check_install_dir()?;
     data_dirs()?;
     let sid = session_user_sid()?;
+    if sid == SYSTEM_SID {
+        // Setup ran as SYSTEM with nobody signed in (deployment tools). A start
+        // from the Start menu then asks for elevation instead.
+        log::info!("no signed-in user; task {TASK_NAME} not created");
+        return Ok(());
+    }
     let xml = task_xml(&exe, &sid, logon);
     let file = base_dir()?.join("task.xml");
     let mut bytes = vec![0xff, 0xfe];
     bytes.extend(xml.encode_utf16().flat_map(|u| u.to_le_bytes()));
-    std::fs::write(&file, bytes)?;
+    // A fresh file in the admin-only folder: nobody else can hold it open.
+    match std::fs::remove_file(&file) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file)?
+        .write_all(&bytes)?;
     let code = schtasks(&format!(
         "/Create /TN {TASK_NAME} /XML \"{}\" /F",
         file.display()

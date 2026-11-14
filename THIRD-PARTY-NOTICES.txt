@@ -3,10 +3,11 @@ ufsmount - third-party notices
 ufsmount is licensed under the GNU Affero General Public License v3.0 or
 later (LICENSE.txt). Source: https://github.com/poeggi/winfsp-ufs
 
-It contains or uses the following third-party software.
+ufsmount.exe and ufsmount-tray.exe contain the following third-party
+software. The license texts named below are in the files next to this one.
 
 -------------------------------------------------------------------------------
-rufs / fuse-ufs (compiled into ufsmount.exe and ufsmount-tray.exe)
+rufs / fuse-ufs 0.6.0
 https://github.com/realchonk/fuse-ufs
 
 BSD 2-Clause License
@@ -36,19 +37,66 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 -------------------------------------------------------------------------------
-winfsp-rs (compiled into both executables)
+winfsp-rs: the crates winfsp 0.13.2 and winfsp-sys 0.12.1
 https://github.com/SnowflakePowered/winfsp-rs
 Copyright SnowflakePowered and contributors.
-License: GNU General Public License v3.0.
+License: GNU General Public License v3.0 (GPL-3.0.txt).
 
 -------------------------------------------------------------------------------
-WinFsp - Windows File System Proxy (not included; the setup downloads the
-official installer from its project page when needed)
+WinFsp - Windows File System Proxy
 https://github.com/winfsp/winfsp
 Copyright (C) Bill Zissimopoulos.
 License: GNU General Public License v3.0 with a FLOSS exception.
+The WinFsp runtime is not included; the setup downloads its official
+installer when needed. Its import library and API bindings are linked in
+through winfsp-sys.
 
 -------------------------------------------------------------------------------
-Other Rust crates compiled into both executables are listed in Cargo.lock in
-the source. They are licensed under MIT and/or Apache-2.0; their license
-texts are part of each crate's source on https://crates.io.
+Other Rust crates
+
+Crates offered under "MIT OR Apache-2.0" (or with Zlib as a further choice)
+are used under the Apache License 2.0 (Apache-2.0.txt). Crates offered under
+"Unlicense OR MIT" are used under the Unlicense. Proc-macro crates only run
+while building and are not part of the executables.
+
+Apache-2.0:
+  anstream, anstyle, anstyle-parse, anstyle-query, anstyle-wincon, anyhow,
+  bincode-next, bincode_derive-next, bytemuck, cfg-if, clap, clap_builder,
+  clap_derive, clap_lex, colorchoice, crc32fast, env_filter, env_logger, heck,
+  is_terminal_polyfill, libc, lock_api, log, once_cell_polyfill, parking_lot,
+  parking_lot_core, paste, pastey, proc-macro2, quote, rapidhash, regex,
+  regex-automata, regex-syntax, rustversion, scopeguard, smallvec,
+  static_assertions, syn, thiserror, thiserror-impl, unicode-ident (also
+  Unicode-3.0), unty-next, utf8parse, virtue-next, widestring, windows,
+  windows-collections, windows-core, windows-future, windows-implement,
+  windows-interface, windows-link, windows-numerics, windows-result,
+  windows-strings, windows-sys, windows-threading
+
+Unlicense:
+  aho-corasick, jiff, jiff-core, memchr
+
+MIT: strsim
+
+  The MIT License (MIT)
+
+  Copyright (c) 2015 Danny Guo
+  Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
+  Copyright (c) 2018 Akash Kurdekar
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to
+  deal in the Software without restriction, including without limitation the
+  rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+  sell copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+  IN THE SOFTWARE.

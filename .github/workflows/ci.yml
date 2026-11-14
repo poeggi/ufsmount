@@ -101,6 +101,9 @@ jobs:
             target/release/ufsmount.exe
             target/release/ufsmount-tray.exe
             target/installer/ufsmount-*-setup.exe
+            LICENSE
+            THIRD-PARTY-NOTICES.txt
+            licenses/*.txt
 
   smoke:
     # A fresh runner without WinFsp: the setup has to download it.
@@ -122,6 +125,7 @@ jobs:
           function PathValue { $k = Get-Item $envKey; "$($k.GetValueKind('Path'))|$($k.GetValue('Path', $null, 'DoNotExpandEnvironmentNames'))" }
           $pathBefore = PathValue
           $app = 'C:\Program Files\ufsmount'
+          $uninstKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{9A3E6C51-2F4B-4E8D-9C27-5B1D3F0A8E64}_is1'
           $link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\ufsmount.lnk"
           if (Test-Path 'HKLM:\SOFTWARE\WOW6432Node\WinFsp') { throw 'WinFsp is preinstalled; the download path is not tested' }
 
@@ -130,12 +134,12 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "setup failed: $($p.ExitCode)" }
 
           if (-not (Test-Path 'HKLM:\SOFTWARE\WOW6432Node\WinFsp')) { throw 'WinFsp was not installed' }
-          foreach ($f in 'ufsmount.exe', 'ufsmount-tray.exe', 'LICENSE.txt', 'THIRD-PARTY-NOTICES.txt') {
+          foreach ($f in 'ufsmount.exe', 'ufsmount-tray.exe', 'LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'GPL-3.0.txt', 'Apache-2.0.txt') {
             if (-not (Test-Path "$app\$f")) { throw "missing $f" }
           }
           if (-not (Test-Path $link)) { throw 'missing Start menu link' }
-          $uninst = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' | Get-ItemProperty | Where-Object DisplayName -eq 'ufsmount'
-          if (-not $uninst) { throw 'missing uninstall entry' }
+          if (-not (Test-Path $uninstKey)) { throw 'missing uninstall entry' }
+          $uninst = Get-ItemProperty $uninstKey
           if ((PathValue) -notlike "*$app*") { throw 'PATH was not extended' }
 
           [xml]$task = schtasks.exe /Query /TN ufsmount-tray /XML
@@ -146,10 +150,15 @@ jobs:
           if ($task.Task.Principals.Principal.RunLevel -ne 'HighestAvailable') { throw 'task run level' }
 
           zstd -q -d vendor/fuse-ufs/resources/ufs-little.img.zst -o "$env:RUNNER_TEMP\ufs.img"
+          if ($LASTEXITCODE -ne 0) { throw "zstd failed: $LASTEXITCODE" }
           Start-Process "$app\ufsmount-tray.exe" -ArgumentList '--source', "$env:RUNNER_TEMP\ufs.img"
           $deadline = (Get-Date).AddSeconds(60)
           while (-not (Test-Path 'U:\file1') -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
-          if ((Get-Content 'U:\file1' -Raw) -ne "This is a simple file.`n") { throw 'U:\file1 not readable' }
+          if (-not (Test-Path 'U:\file1')) {
+            Get-Process ufsmount* -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, MainWindowTitle | Out-String | Write-Host
+            throw 'U: did not appear (tray.log is printed below)'
+          }
+          if ((Get-Content 'U:\file1' -Raw) -ne "This is a simple file.`n") { throw 'U:\file1 has the wrong content' }
           $p = Start-Process "$app\ufsmount-tray.exe" -ArgumentList '--quit' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "--quit failed: $($p.ExitCode)" }
           if (Test-Path 'U:\') { throw 'U: still mounted' }
@@ -163,7 +172,7 @@ jobs:
           }
           schtasks.exe /Query /TN ufsmount-tray 2>$null
           if ($LASTEXITCODE -eq 0) { throw 'task left behind' }
-          if (Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' | Get-ItemProperty | Where-Object DisplayName -eq 'ufsmount') { throw 'uninstall entry left behind' }
+          if (Test-Path $uninstKey) { throw 'uninstall entry left behind' }
           # WinFsp stays installed and may add its own entry; ignore that one.
           function Parts($v) { ($v -split '\|', 2)[1] -split ';' | Where-Object { $_ -notlike '*\WinFsp\*' } }
           $after = PathValue
@@ -179,8 +188,20 @@ jobs:
         if: failure()
         shell: pwsh
         run: |
-          Get-Content "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\uninst.log" -ErrorAction SilentlyContinue | Select-Object -Last 120
-          Get-Content "$env:ProgramData\ufsmount\tray\tray.log" -ErrorAction SilentlyContinue
+          $logs = "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\setup.log.winfsp.txt", "$env:RUNNER_TEMP\uninst.log", "$env:ProgramData\ufsmount\tray\tray.log"
+          foreach ($l in $logs) {
+            if (Test-Path $l) {
+              Write-Host "===== $l"
+              Get-Content $l -Tail 80 | Write-Host
+              Copy-Item $l "$env:RUNNER_TEMP\logs-$(Split-Path $l -Leaf)"
+            }
+          }
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: smoke-logs
+          path: ${{ runner.temp }}/logs-*
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -200,6 +221,8 @@ jobs:
         run: |
           mkdir out
           find dist -type f \( -name ufsmount.exe -o -name 'ufsmount-*-setup.exe' \) -exec cp {} out/ \;
+          cp dist/LICENSE out/LICENSE.txt
+          cp dist/THIRD-PARTY-NOTICES.txt dist/licenses/*.txt out/
           cd out
           sha256sum * > SHA256SUMS
           cat SHA256SUMS

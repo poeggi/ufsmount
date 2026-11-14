@@ -22,6 +22,7 @@ DisableProgramGroupPage=yes
 DirExistsWarning=no
 PrivilegesRequired=admin
 MinVersion=10.0
+SetupArchitecture=x64
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
 OutputDir=..\target\installer
@@ -47,6 +48,8 @@ Source: "..\target\release\ufsmount.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\ufsmount-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"
 Source: "..\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"
+Source: "..\licenses\GPL-3.0.txt"; DestDir: "{app}"
+Source: "..\licenses\Apache-2.0.txt"; DestDir: "{app}"
 
 [Icons]
 Name: "{autoprograms}\ufsmount"; Filename: "{app}\ufsmount-tray.exe"; Comment: "Mount FreeBSD UFS disks read-only"
@@ -61,6 +64,7 @@ const
 
 var
   LauncherChecked: Boolean;
+  RestartNeeded: Boolean;
 
 { --- running processes --- }
 
@@ -120,8 +124,19 @@ begin
       ((Minor = {#WinFspMinMinor}) and (Build >= {#WinFspMinBuild}))));
 end;
 
-{ Install WinFsp if it is missing or too old. Returns an error text, or ''. }
-function EnsureWinFsp(var NeedsRestart: Boolean): String;
+{ The WinFsp MSI next to the setup exe, if it is the expected one. }
+function LocalMsiOk(const Msi: String): Boolean;
+begin
+  try
+    Result := FileExists(Msi) and (GetSHA256OfFile(Msi) = '{#WinFspSha256}');
+  except
+    Result := False;
+  end;
+end;
+
+{ Install WinFsp if it is missing or too old. Returns an error text, or ''.
+  A restart request of the MSI (3010) is passed on through NeedRestart. }
+function EnsureWinFsp: String;
 var
   Msi, MsiLog, UI: String;
   Code: Integer;
@@ -130,7 +145,7 @@ begin
   if WinFspOk then
     exit;
   Msi := ExpandConstant('{src}\{#WinFspMsi}');
-  if not (FileExists(Msi) and (GetSHA256OfFile(Msi) = '{#WinFspSha256}')) then begin
+  if not LocalMsiOk(Msi) then begin
     try
       DownloadTemporaryFile('{#WinFspUrl}', '{#WinFspMsi}', '{#WinFspSha256}', nil);
     except
@@ -141,7 +156,12 @@ begin
     end;
     Msi := ExpandConstant('{tmp}\{#WinFspMsi}');
   end;
-  MsiLog := ExpandConstant('{tmp}\winfsp-install.log');
+  { Next to the setup log: the temporary folder is deleted when setup ends. }
+  MsiLog := ExpandConstant('{log}');
+  if MsiLog = '' then
+    MsiLog := ExpandConstant('{commonappdata}\ufsmount-winfsp-setup.txt')
+  else
+    MsiLog := MsiLog + '.winfsp.txt';
   if WizardSilent then UI := '/qn' else UI := '/passive';
   if not Exec(ExpandConstant('{sys}\msiexec.exe'),
     Format('/i "%s" /norestart %s /l*v "%s"', [Msi, UI, MsiLog]),
@@ -150,7 +170,11 @@ begin
   Log(Format('WinFsp setup: exit code %d, log %s', [Code, MsiLog]));
   case Code of
     0: ;
-    3010: NeedsRestart := True;
+    3010: begin
+      { The new DLL is in place after the restart; do not check it now. }
+      RestartNeeded := True;
+      exit;
+    end;
     1618: begin
       Result := 'Another installation is running. Wait until it ends and run this setup again.';
       exit;
@@ -216,6 +240,33 @@ begin
     Log('PATH: cannot write it');
 end;
 
+{ Paths without the entries for Dir; all other entries stay as they are. }
+function WithoutDir(Paths, Dir: String): String;
+var
+  P: Integer;
+  Part: String;
+  First: Boolean;
+begin
+  Result := '';
+  First := True;
+  while True do begin
+    P := Pos(';', Paths);
+    if P = 0 then
+      Part := Paths
+    else
+      Part := Copy(Paths, 1, P - 1);
+    if not SameDir(Part, Dir) then begin
+      if not First then
+        Result := Result + ';';
+      Result := Result + Part;
+      First := False;
+    end;
+    if P = 0 then
+      break;
+    Delete(Paths, 1, P);
+  end;
+end;
+
 procedure RemoveFromPath;
 var
   Paths, Added: String;
@@ -226,9 +277,10 @@ begin
   if RegQueryStringValue(HKLM, EnvKey, 'Path', Paths) then begin
     N := Length(Paths) - Length(Added);
     if (N >= 0) and (Copy(Paths, N + 1, Length(Added)) = Added) then
+      { Still at the end: take back exactly what was appended. }
       RegWriteExpandStringValue(HKLM, EnvKey, 'Path', Copy(Paths, 1, N))
     else
-      Log('PATH: our entry is not at the end any more; left as is');
+      RegWriteExpandStringValue(HKLM, EnvKey, 'Path', WithoutDir(Paths, ExpandConstant('{app}')));
   end;
   RegDeleteKeyIncludingSubkeys(HKLM, OwnKey);
 end;
@@ -248,7 +300,12 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   StopRunning;
-  Result := EnsureWinFsp(NeedsRestart);
+  Result := EnsureWinFsp;
+end;
+
+function NeedRestart: Boolean;
+begin
+  Result := RestartNeeded;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

@@ -22,15 +22,16 @@ The setup is not signed yet:
 
 - SmartScreen warns. Click "More info", then "Run anyway".
 - Smart App Control (Windows 11) blocks it. Then build it yourself, or wait for a signed release.
-- Check the download: `Get-FileHash ufsmount-<version>-setup.exe` must match `SHA256SUMS` of the release.
+- Check the download: `Get-FileHash ufsmount-<version>-setup.exe` must match `SHA256SUMS` of the release
+  (Get-FileHash prints upper case, SHA256SUMS lower case).
 
-Silent install: `ufsmount-<version>-setup.exe /VERYSILENT /NORESTART`.
+Silent install: `ufsmount-<version>-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
 
 Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
 
 ## Start and stop
 
-- Start: Start menu > ufsmount. No UAC prompt.
+- Start: Start menu > ufsmount. No UAC prompt for the user who ran the setup; other accounts get one.
 - The ufsmount icon appears in the notification area (maybe under the arrow).
 - It mounts every UFS2 file system it finds, starting at U:. Plugged-in disks are mounted too.
 - Right-click the icon: Open or Unmount a drive, Rescan disks, Quit.

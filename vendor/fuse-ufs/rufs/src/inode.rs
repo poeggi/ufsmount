@@ -13,29 +13,33 @@ use bincode_next::{
 
 use crate::data::*;
 
-fn timetosys(mut s: UfsTime, ns: u32) -> SystemTime {
-	let neg = s < 0;
-	if neg {
-		s = -s;
-	}
-	let dur = Duration::new(s as u64, ns);
-	let mut time = SystemTime::UNIX_EPOCH;
-	if neg {
-		time -= dur;
+/// On disk, a time is `s` seconds since the epoch plus `ns` nanoseconds; `ns` is
+/// never negative. Times that `SystemTime` cannot hold (on Windows, anything before
+/// 1601) become the epoch.
+fn timetosys(s: UfsTime, ns: u32) -> SystemTime {
+	let secs = Duration::from_secs(s.unsigned_abs());
+	let base = if s < 0 {
+		SystemTime::UNIX_EPOCH.checked_sub(secs)
 	} else {
-		time += dur;
-	}
-	time
+		SystemTime::UNIX_EPOCH.checked_add(secs)
+	};
+	base.and_then(|t| t.checked_add(Duration::from_nanos(ns.min(999_999_999).into())))
+		.unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 fn systotime(t: SystemTime) -> (UfsTime, u32) {
-	let (diff, neg) = if t >= SystemTime::UNIX_EPOCH {
-		(t.duration_since(SystemTime::UNIX_EPOCH).unwrap(), 1)
-	} else {
-		(SystemTime::UNIX_EPOCH.duration_since(t).unwrap(), -1)
-	};
-
-	(neg * diff.as_secs() as UfsTime, diff.subsec_nanos())
+	match t.duration_since(SystemTime::UNIX_EPOCH) {
+		Ok(d) => (d.as_secs() as UfsTime, d.subsec_nanos()),
+		Err(e) => {
+			// Round the seconds down, so that the nanoseconds stay positive.
+			let d = e.duration();
+			let s = -(d.as_secs() as UfsTime);
+			match d.subsec_nanos() {
+				0 => (s, 0),
+				ns => (s - 1, 1_000_000_000 - ns),
+			}
+		}
+	}
 }
 
 impl Inode {
@@ -247,6 +251,38 @@ impl Encode for InodeData {
 }
 
 mod test {
+	#[test]
+	fn timetosys_extremes() {
+		use std::time::{Duration, SystemTime};
+
+		let t = super::timetosys;
+		let epoch = SystemTime::UNIX_EPOCH;
+		assert_eq!(t(0, 0), epoch);
+		assert_eq!(t(1, 500), epoch + Duration::new(1, 500));
+		assert_eq!(t(-1, 0), epoch - Duration::from_secs(1));
+		assert_eq!(t(-1, 500_000_000), epoch - Duration::from_millis(500));
+		// Must not panic.
+		t(i64::MIN, u32::MAX);
+		t(i64::MAX, u32::MAX);
+	}
+
+	#[test]
+	fn systotime_before_epoch() {
+		use std::time::{Duration, SystemTime};
+
+		let epoch = SystemTime::UNIX_EPOCH;
+		let half = epoch - Duration::from_millis(500);
+		assert_eq!(super::systotime(half), (-1, 500_000_000));
+		for t in [
+			epoch - Duration::new(5, 100),
+			epoch,
+			epoch + Duration::new(9, 900),
+		] {
+			let (s, ns) = super::systotime(t);
+			assert_eq!(super::timetosys(s, ns), t);
+		}
+	}
+
 	#[test]
 	fn inode_size() {
 		let bs = 32768;

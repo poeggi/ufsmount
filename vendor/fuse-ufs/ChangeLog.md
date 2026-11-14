@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - rufs: timestamps that `SystemTime` cannot hold no longer panic; times before the epoch with nanoseconds are read and written correctly
 - rufs: short symlinks with extattr blocks, and long symlinks that end in a fragment
 - rufs: reject superblocks with impossible sizes or offsets; open file systems whose `sbsize` is not `fsize` (512 and 1024-byte fragments)
+- rufs: inode numbers past the last cylinder group and unknown file types give `EIO`
 
 ## [0.6.0] - 2025-09-27
 

@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - rufs: build on non-Unix targets, such as Windows
 - rufs: `dir_iter_bytes()` and `dir_lookup_bytes()`, which pass names as raw on-disk bytes
+- rufs: `Info` has the file system size in fragments, clean flag, status flags, id, volume name and last mount point
 
 ### Fix
 

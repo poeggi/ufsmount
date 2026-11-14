@@ -164,7 +164,15 @@ jobs:
           schtasks.exe /Query /TN ufsmount-tray 2>$null
           if ($LASTEXITCODE -eq 0) { throw 'task left behind' }
           if (Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' | Get-ItemProperty | Where-Object DisplayName -eq 'ufsmount') { throw 'uninstall entry left behind' }
-          if ((PathValue) -ne $pathBefore) { throw "PATH changed: $(PathValue)" }
+          # WinFsp stays installed and may add its own entry; ignore that one.
+          function Parts($v) { ($v -split '\|', 2)[1] -split ';' | Where-Object { $_ -notlike '*\WinFsp\*' } }
+          $after = PathValue
+          $diff = Compare-Object (Parts $pathBefore) (Parts $after)
+          if ($diff -or ($after -split '\|')[0] -ne ($pathBefore -split '\|')[0]) {
+            $diff | Format-Table -AutoSize | Out-String -Width 400 | Write-Host
+            throw 'PATH changed'
+          }
+          Compare-Object ($pathBefore -split ';') ($after -split ';') | Format-Table -AutoSize | Out-String -Width 400 | Write-Host
           'smoke test passed'
 
       - name: Logs

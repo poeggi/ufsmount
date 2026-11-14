@@ -79,11 +79,15 @@ fn win32_message(code: u32) -> String {
     )
 }
 
-/// Find a [`DeviceError`] inside an [`io::Error`].
+/// Find a [`DeviceError`] inside an [`io::Error`], also when rufs wrapped it.
 pub fn device_error(e: &io::Error) -> Option<DeviceError> {
-    e.get_ref()
-        .and_then(|inner| inner.downcast_ref::<DeviceError>())
-        .copied()
+    let mut inner = e.get_ref()?;
+    loop {
+        if let Some(d) = inner.downcast_ref::<DeviceError>() {
+            return Some(*d);
+        }
+        inner = inner.downcast_ref::<io::Error>()?.get_ref()?;
+    }
 }
 
 /// The operating system side of a disk: exact reads at byte offsets.

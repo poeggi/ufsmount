@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]
+  pull_request:
+    paths-ignore: ["**.md", "LICENSE"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  WINFSP_URL: https://github.com/winfsp/winfsp/releases/download/v2.2B5/winfsp-2.2.26286.msi
+  WINFSP_SHA256: 293FFB9BCC0B625C85079FE85FA77F8FE98170ABA51A02AC9C83D58F6C3B0E2F
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked --no-deps -- -D warnings
+
+      - name: Install WinFsp
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:WINFSP_URL -OutFile winfsp.msi
+          $hash = (Get-FileHash winfsp.msi -Algorithm SHA256).Hash
+          if ($hash -ne $env:WINFSP_SHA256) { throw "WinFsp hash mismatch: $hash" }
+          $p = Start-Process msiexec -ArgumentList '/i', 'winfsp.msi', '/qn', '/norestart' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "msiexec failed: $($p.ExitCode)" }
+
+      - name: Test (with WinFsp mount)
+        run: cargo test --locked
+        env:
+          UFSMOUNT_MOUNT_TEST: 1
+
+      - name: Test rufs
+        run: cargo test --manifest-path vendor/fuse-ufs/Cargo.toml -p rufs --locked --ignore-rust-version
+        env:
+          CARGO_TARGET_DIR: target/vendor
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ufsmount
+          path: target/release/ufsmount.exe

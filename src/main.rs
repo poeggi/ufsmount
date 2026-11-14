@@ -20,7 +20,7 @@ Credits:
     https://github.com/winfsp/winfsp
   rufs / fuse-ufs, Copyright (c) Benjamin Stuerz and contributors (BSD-2-Clause)
     https://github.com/realchonk/fuse-ufs
-  winfsp-rs, Copyright (c) Ronny Chan and contributors (GPL-3.0)
+  winfsp-rs, by SnowflakePowered and contributors (GPL-3.0)
     https://github.com/SnowflakePowered/winfsp-rs"
     };
 }

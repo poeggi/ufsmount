@@ -7,7 +7,7 @@ use crate::{err, InodeNum};
 struct Header {
 	inr:     InodeNum,
 	reclen:  u16,
-	kind:    Option<InodeType>,
+	dtype:   u8,
 	namelen: u8,
 	name:    [u8; UFS_MAXNAMELEN + 1],
 }
@@ -21,7 +21,7 @@ impl Header {
 		Self {
 			inr,
 			reclen,
-			kind: Some(kind),
+			dtype: dtype_of(kind),
 			name,
 			namelen: dname.len() as u8,
 		}
@@ -33,67 +33,54 @@ impl Header {
 		if reclen == 0 {
 			return Ok(None);
 		}
-		let kind: u8 = file.decode()?;
+		let dtype: u8 = file.decode()?;
 		let namelen: u8 = file.decode()?;
 		let mut name = [0u8; UFS_MAXNAMELEN + 1];
+
+		// An unused entry (d_ino 0) only holds space; its name may be stale.
+		if inr.get() == 0 {
+			file.seek_relative(i64::from(reclen) - 8)?;
+			return Ok(Some(Self {
+				inr,
+				reclen,
+				dtype,
+				namelen: 0,
+				name,
+			}));
+		}
+
 		file.read(&mut name[0..namelen.into()])?;
 
 		// skip remaining bytes of record, if any
 		let off = reclen - (namelen as u16) - 8;
 		file.seek_relative(off as i64)?;
 
-		if inr.get() == 0 {
-			return Ok(None);
-		}
-
 		log::trace!(
-			"Header::read(): {{ inr={inr}, reclen={reclen}, namelen={namelen}, name=\"{}\", kind={kind} }}",
+			"Header::read(): {{ inr={inr}, reclen={reclen}, namelen={namelen}, name=\"{}\", dtype={dtype} }}",
 			name[0..namelen.into()].escape_ascii()
 		);
-
-		let kind = match kind {
-			DT_FIFO => Some(InodeType::NamedPipe),
-			DT_CHR => Some(InodeType::CharDevice),
-			DT_DIR => Some(InodeType::Directory),
-			DT_BLK => Some(InodeType::BlockDevice),
-			DT_REG => Some(InodeType::RegularFile),
-			DT_LNK => Some(InodeType::Symlink),
-			DT_SOCK => Some(InodeType::Socket),
-			DT_WHT => None,
-			DT_UNKNOWN => todo!("DT_UNKNOWN: {inr}"),
-			_ => panic!("invalid filetype: {kind}"),
-		};
 
 		Ok(Some(Self {
 			inr,
 			reclen,
-			kind,
+			dtype,
 			namelen,
 			name,
 		}))
 	}
 
 	fn write<T: Read + Write + Seek>(&self, file: &mut Decoder<T>) -> IoResult<()> {
-		let kind: u8 = match self.kind {
-			Some(InodeType::NamedPipe) => DT_FIFO,
-			Some(InodeType::CharDevice) => DT_CHR,
-			Some(InodeType::Directory) => DT_DIR,
-			Some(InodeType::BlockDevice) => DT_BLK,
-			Some(InodeType::RegularFile) => DT_REG,
-			Some(InodeType::Symlink) => DT_LNK,
-			Some(InodeType::Socket) => DT_SOCK,
-			None => DT_WHT,
-		};
 		log::trace!(
-			"Header::write(inr={}, reclen={}, namelen={}, name=\"{}\", kind={kind})",
+			"Header::write(inr={}, reclen={}, namelen={}, name=\"{}\", dtype={})",
 			self.inr,
 			self.reclen,
 			self.namelen,
-			self.name().escape_ascii()
+			self.name().escape_ascii(),
+			self.dtype
 		);
 		file.encode(&self.inr)?;
 		file.encode(&self.reclen)?;
-		file.encode(&kind)?;
+		file.encode(&self.dtype)?;
 		file.encode(&self.namelen)?;
 		file.write(&self.name[0..self.namelen.into()])?;
 
@@ -103,12 +90,38 @@ impl Header {
 		Ok(())
 	}
 
+	/// The file type from d_type; `None` for whiteouts, `DT_UNKNOWN` and invalid values.
+	fn kind(&self) -> Option<InodeType> {
+		match self.dtype {
+			DT_FIFO => Some(InodeType::NamedPipe),
+			DT_CHR => Some(InodeType::CharDevice),
+			DT_DIR => Some(InodeType::Directory),
+			DT_BLK => Some(InodeType::BlockDevice),
+			DT_REG => Some(InodeType::RegularFile),
+			DT_LNK => Some(InodeType::Symlink),
+			DT_SOCK => Some(InodeType::Socket),
+			_ => None,
+		}
+	}
+
 	fn name(&self) -> &[u8] {
 		&self.name[0..self.namelen.into()]
 	}
 
 	fn minlen(&self) -> u16 {
 		dirsiz(self.namelen)
+	}
+}
+
+fn dtype_of(kind: InodeType) -> u8 {
+	match kind {
+		InodeType::NamedPipe => DT_FIFO,
+		InodeType::CharDevice => DT_CHR,
+		InodeType::Directory => DT_DIR,
+		InodeType::BlockDevice => DT_BLK,
+		InodeType::RegularFile => DT_REG,
+		InodeType::Symlink => DT_LNK,
+		InodeType::Socket => DT_SOCK,
 	}
 }
 
@@ -128,15 +141,21 @@ fn readdir_block<T>(
 
 	while let Ok(Some(hdr)) = Header::parse(&mut file) {
 		if hdr.inr.get() == 0 {
-			break;
+			continue;
 		}
 
-		let Some(kind) = hdr.kind else {
-			log::warn!(
-				"readdir_block({inr}): encountered a whiteout entry: \"{}\"",
-				hdr.name().escape_ascii()
-			);
-			continue;
+		let Some(kind) = hdr.kind() else {
+			match hdr.dtype {
+				DT_WHT => {
+					log::warn!(
+						"readdir_block({inr}): encountered a whiteout entry: \"{}\"",
+						hdr.name().escape_ascii()
+					);
+					continue;
+				}
+				DT_UNKNOWN => todo!("DT_UNKNOWN: {}", hdr.inr),
+				dtype => panic!("invalid filetype: {dtype}"),
+			}
 		};
 
 		let res = f(hdr.name(), hdr.inr, kind);
@@ -156,6 +175,16 @@ fn newlink_block(block: &mut [u8], mut entry: Header, config: Config) -> IoResul
 		let Ok(Some(mut hdr)) = Header::parse(&mut file) else {
 			break;
 		};
+		if hdr.inr.get() == 0 {
+			// The new entry takes the whole record of an unused entry.
+			if hdr.reclen < entry.minlen() {
+				continue;
+			}
+			entry.reclen = hdr.reclen;
+			file.seek(pos)?;
+			entry.write(&mut file)?;
+			return Ok(true);
+		}
 		let minlen = hdr.minlen();
 		let rem = hdr.reclen - minlen;
 		if rem < entry.minlen() {
@@ -189,7 +218,7 @@ fn unlink_block(
 			break;
 		};
 
-		if hdr.name() != name {
+		if hdr.inr.get() == 0 || hdr.name() != name {
 			prevpos = pos;
 			continue;
 		}
@@ -540,5 +569,127 @@ mod t {
 		let block = newdir(inr(2), inr(5), Config::little()).unwrap();
 		assert_eq!(reclen_at(&block, 0, false), 12);
 		assert_eq!(reclen_at(&block, 12, false), (DIRBLKSIZE - 12) as u16);
+	}
+
+	fn config(big: bool) -> Config {
+		if big {
+			Config::big()
+		} else {
+			Config::little()
+		}
+	}
+
+	fn push_entry(block: &mut Vec<u8>, big: bool, inr: u32, reclen: u16, dtype: u8, name: &[u8]) {
+		let start = block.len();
+		if big {
+			block.extend(inr.to_be_bytes());
+			block.extend(reclen.to_be_bytes());
+		} else {
+			block.extend(inr.to_le_bytes());
+			block.extend(reclen.to_le_bytes());
+		}
+		block.push(dtype);
+		block.push(name.len() as u8);
+		block.extend(name);
+		block.resize(start + reclen as usize, 0);
+	}
+
+	fn list(block: &[u8], big: bool) -> Vec<(Vec<u8>, u32)> {
+		let mut names = Vec::new();
+		readdir_block(inr(2), block, config(big), |name, inr, _kind| {
+			names.push((name.to_vec(), inr.get()));
+			None::<()>
+		})
+		.unwrap();
+		names
+	}
+
+	/// FreeBSD zeroes d_ino when it removes the first entry of a chunk, but keeps its
+	/// d_reclen. The entries behind it must still be found.
+	#[test]
+	fn unused_first_entry() {
+		for big in [false, true] {
+			let mut block = Vec::new();
+			push_entry(&mut block, big, 0, 16, DT_REG, b"gone");
+			push_entry(&mut block, big, 5, 16, DT_REG, b"live");
+			push_entry(
+				&mut block,
+				big,
+				6,
+				(DIRBLKSIZE - 32) as u16,
+				DT_DIR,
+				b"subdir",
+			);
+			assert_eq!(
+				list(&block, big),
+				vec![(b"live".to_vec(), 5), (b"subdir".to_vec(), 6)]
+			);
+		}
+	}
+
+	/// The name length of an unused entry may be stale, even longer than the record.
+	#[test]
+	fn unused_entry_with_stale_namelen() {
+		let mut block = Vec::new();
+		push_entry(&mut block, false, 0, 12, DT_REG, b"x");
+		block[7] = 200;
+		push_entry(
+			&mut block,
+			false,
+			5,
+			(DIRBLKSIZE - 12) as u16,
+			DT_REG,
+			b"live",
+		);
+		assert_eq!(list(&block, false), vec![(b"live".to_vec(), 5)]);
+	}
+
+	/// Unlinking the entry after an unused first entry merges it into that record,
+	/// which keeps its d_type.
+	#[test]
+	fn unlink_after_unused_entry() {
+		for big in [false, true] {
+			let mut block = Vec::new();
+			push_entry(&mut block, big, 0, 16, DT_DIR, b"gone");
+			push_entry(&mut block, big, 5, 16, DT_REG, b"live");
+			push_entry(
+				&mut block,
+				big,
+				6,
+				(DIRBLKSIZE - 32) as u16,
+				DT_REG,
+				b"other",
+			);
+
+			let res = unlink_block(inr(2), &mut block, b"live", config(big)).unwrap();
+			assert_eq!(res.map(|(inr, has)| (inr.get(), has)), Some((5, true)));
+			assert_eq!(list(&block, big), vec![(b"other".to_vec(), 6)]);
+			assert_eq!(reclen_at(&block, 0, big), 32);
+			assert_eq!(block[6], DT_DIR);
+		}
+	}
+
+	/// A new entry takes the whole record of an unused first entry.
+	#[test]
+	fn newlink_reuses_unused_entry() {
+		for big in [false, true] {
+			let mut block = Vec::new();
+			push_entry(&mut block, big, 0, 16, DT_REG, b"gone");
+			push_entry(
+				&mut block,
+				big,
+				5,
+				(DIRBLKSIZE - 16) as u16,
+				DT_REG,
+				b"live",
+			);
+
+			let entry = Header::new(inr(7), InodeType::RegularFile, b"new");
+			assert!(newlink_block(&mut block, entry, config(big)).unwrap());
+			assert_eq!(
+				list(&block, big),
+				vec![(b"new".to_vec(), 7), (b"live".to_vec(), 5)]
+			);
+		}
 	}
 }

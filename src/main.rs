@@ -18,7 +18,8 @@ macro_rules! credits {
 Credits:
   WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
     https://github.com/winfsp/winfsp
-  rufs / fuse-ufs, Copyright (c) Benjamin Stuerz and contributors (BSD-2-Clause)
+  rufs / fuse-ufs, Copyright (c) Benjamin Stuerz, Alan Somers, Davids Paskevics
+    and contributors (BSD-2-Clause)
     https://github.com/realchonk/fuse-ufs
   winfsp-rs, by SnowflakePowered and contributors (GPL-3.0)
     https://github.com/SnowflakePowered/winfsp-rs"
@@ -45,11 +46,11 @@ struct Cli {
     prefix: Option<String>,
 
     /// Launcher mode: drive letter or empty.
-    #[arg(short = 'm', hide = true)]
+    #[arg(short = 'm', hide = true, requires = "prefix")]
     mountpoint: Option<String>,
 
     /// Launcher mode: the user who ran `net use` (DOMAIN\name).
-    #[arg(short = 'U', hide = true)]
+    #[arg(short = 'U', hide = true, requires = "prefix")]
     user: Option<String>,
 }
 
@@ -132,8 +133,11 @@ enum Command {
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    if cli.command.is_some() && cli.prefix.is_some() {
+        anyhow::bail!("-u, -m and -U are for launcher mode and take no command");
+    }
     let Some(command) = cli.command else {
-        if cli.prefix.is_some() || cli.mountpoint.is_some() {
+        if cli.prefix.is_some() {
             launcher::run_service(cli.prefix, cli.mountpoint, cli.user)?;
             return Ok(ExitCode::SUCCESS);
         }
@@ -167,7 +171,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 stats.skipped,
                 stats.failed
             );
-            if stats.failed > 0 {
+            if stats.aborted {
+                eprintln!("error: the disk went away, copy aborted");
+            }
+            if stats.failed > 0 || stats.aborted {
                 return Ok(ExitCode::from(1));
             }
         }

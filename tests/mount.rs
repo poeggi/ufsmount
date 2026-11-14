@@ -5,15 +5,36 @@
 mod common;
 
 use std::fs;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use common::*;
+use windows::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 struct Mounted {
     child: Child,
     root: PathBuf,
+}
+
+impl Mounted {
+    /// Stop with Ctrl+Break, as the WinFsp launcher does. `None` if the
+    /// event could not be delivered (no console).
+    fn stop(&mut self) -> Option<ExitStatus> {
+        // SAFETY: plain console call with the child's process group id.
+        unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.child.id()) }.ok()?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(15) {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        None
+    }
 }
 
 impl Drop for Mounted {
@@ -23,6 +44,14 @@ impl Drop for Mounted {
     }
 }
 
+fn enabled() -> bool {
+    let on = std::env::var_os("UFSMOUNT_MOUNT_TEST").is_some();
+    if !on {
+        eprintln!("skipped: set UFSMOUNT_MOUNT_TEST=1 to run (needs WinFsp)");
+    }
+    on
+}
+
 fn free_letter() -> char {
     ('M'..='Z')
         .rev()
@@ -30,19 +59,23 @@ fn free_letter() -> char {
         .expect("no free drive letter")
 }
 
+fn spawn(image: &Path, mountpoint: &str) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_ufsmount"))
+        .args(["-v", "mount"])
+        .arg(image)
+        .arg(mountpoint)
+        .stdin(Stdio::null())
+        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .unwrap()
+}
+
 fn mount(image: &Path) -> Option<Mounted> {
-    if std::env::var_os("UFSMOUNT_MOUNT_TEST").is_none() {
-        eprintln!("skipped: set UFSMOUNT_MOUNT_TEST=1 to run (needs WinFsp)");
+    if !enabled() {
         return None;
     }
     let letter = free_letter();
-    let child = Command::new(env!("CARGO_BIN_EXE_ufsmount"))
-        .args(["-v", "mount"])
-        .arg(image)
-        .arg(format!("{letter}:"))
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
+    let child = spawn(image, &format!("{letter}:"));
     let mut m = Mounted {
         child,
         root: PathBuf::from(format!("{letter}:\\")),
@@ -125,5 +158,36 @@ fn mounted_image() {
         assert!(fs::create_dir(root.join("newdir")).is_err());
         assert!(fs::rename(root.join("file1"), root.join("file9")).is_err());
         assert!(root.join("file1").exists());
+
+        let mut m = m;
+        match m.stop() {
+            Some(status) => {
+                assert!(status.success(), "Ctrl+Break exit: {status}");
+                assert!(!m.root.exists(), "the drive is gone after the stop");
+            }
+            None => eprintln!("Ctrl+Break not delivered (no console); stopped by kill"),
+        }
     }
+}
+
+#[test]
+fn failed_mount_exits_with_an_error() {
+    if !enabled() {
+        return;
+    }
+    let path = write_temp("mount-busy", &image_bytes("ufs-little"));
+    let windows = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    let mut child = spawn(&path, &windows);
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            panic!("ufsmount kept running although {windows} is in use");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(!status.success(), "mount on {windows} must fail");
 }

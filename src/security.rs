@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The one security descriptor every file and directory gets.
+//! Security descriptors, SIDs and ACL checks.
 
 use std::ffi::c_void;
+use std::path::Path;
 
-use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
+    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetSecurityDescriptorDacl,
     GetSecurityDescriptorGroup, GetSecurityDescriptorLength, GetSecurityDescriptorOwner,
-    GetTokenInformation, IsValidSecurityDescriptor, LookupAccountNameW, PSECURITY_DESCRIPTOR, PSID,
-    SID_NAME_USE, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    GetTokenInformation, IsValidSecurityDescriptor, LookupAccountNameW, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
+    TokenElevation, TokenUser,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{BOOL, HSTRING, PWSTR};
@@ -18,12 +23,25 @@ use windows::core::{BOOL, HSTRING, PWSTR};
 /// WinFsp asks with a 1024-byte buffer first and loops on larger descriptors.
 const MAX_SD: usize = 1024;
 
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const INHERIT_ONLY_ACE: u8 = 0x08;
+/// Rights that change a file: write/append data, write EA, delete child,
+/// write attributes, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE.
+pub const WRITE_RIGHTS: u32 = 0x5000_0000 | 0x000d_0000 | 0x0156;
+
+/// SYSTEM, Administrators, TrustedInstaller.
+const TRUSTED: [&str; 3] = [
+    "S-1-5-18",
+    "S-1-5-32-544",
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+];
+
 /// A self-relative security descriptor.
 #[derive(Clone, Debug)]
 pub struct SecurityDescriptor(Vec<u8>);
 
 impl SecurityDescriptor {
-    /// Parse and check an SDDL string: owner and group present, at most 1024 bytes.
+    /// Parse and check an SDDL string: owner, group and a DACL present, at most 1024 bytes.
     pub fn from_sddl(sddl: &str) -> anyhow::Result<SecurityDescriptor> {
         let mut psd = PSECURITY_DESCRIPTOR::default();
         let mut size = 0u32;
@@ -47,9 +65,21 @@ impl SecurityDescriptor {
         Ok(sd)
     }
 
+    /// An SDDL for the files of a mount: like [`Self::from_sddl`], and it may
+    /// grant read rights only (the volume is read-only).
+    pub fn for_files(sddl: &str) -> anyhow::Result<SecurityDescriptor> {
+        let sd = Self::from_sddl(sddl)?;
+        // SAFETY: the DACL points into sd, which lives through the call.
+        let aces = unsafe { allow_aces(sd.dacl()?)? };
+        if let Some((sid, _)) = aces.iter().find(|(_, mask)| mask & WRITE_RIGHTS != 0) {
+            anyhow::bail!("the SDDL grants write rights to {sid}; grant read rights only (FR, FX)");
+        }
+        Ok(sd)
+    }
+
     /// Read access for SYSTEM, Administrators and one user.
     pub fn read_only_for(user_sid: &str) -> anyhow::Result<SecurityDescriptor> {
-        Self::from_sddl(&format!(
+        Self::for_files(&format!(
             "O:BAG:BAD:P(A;;FRFX;;;SY)(A;;FRFX;;;BA)(A;;FRFX;;;{user_sid})"
         ))
     }
@@ -78,7 +108,24 @@ impl SecurityDescriptor {
             GetSecurityDescriptorGroup(psd, &mut sid, &mut defaulted)?;
             anyhow::ensure!(!sid.is_invalid(), "security descriptor has no group (G:)");
         }
+        self.dacl()?;
         Ok(())
+    }
+
+    /// The DACL; a missing or NULL DACL (which grants everyone everything) is an error.
+    fn dacl(&self) -> anyhow::Result<*const ACL> {
+        let mut present = BOOL::default();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut defaulted = BOOL::default();
+        // SAFETY: the descriptor is valid; out pointers are valid.
+        unsafe {
+            GetSecurityDescriptorDacl(self.as_psd(), &mut present, &mut dacl, &mut defaulted)?;
+        }
+        anyhow::ensure!(
+            present.as_bool() && !dacl.is_null(),
+            "security descriptor has no DACL (D:), which would grant everyone full access"
+        );
+        Ok(dacl)
     }
 
     pub(crate) fn as_psd(&self) -> PSECURITY_DESCRIPTOR {
@@ -110,37 +157,155 @@ impl SecurityDescriptor {
     }
 }
 
+/// The allow ACEs of a DACL that apply to the object itself: (SID string, mask).
+///
+/// # Safety
+/// `dacl` must point to a valid ACL.
+unsafe fn allow_aces(dacl: *const ACL) -> anyhow::Result<Vec<(String, u32)>> {
+    let mut info = ACL_SIZE_INFORMATION::default();
+    // SAFETY: valid ACL per the contract; info is properly sized.
+    unsafe {
+        GetAclInformation(
+            dacl,
+            (&raw mut info).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )?;
+    }
+    let mut out = Vec::new();
+    for i in 0..info.AceCount {
+        let mut ace: *mut c_void = std::ptr::null_mut();
+        // SAFETY: i is below the ACE count; GetAce returns a pointer into the ACL.
+        unsafe {
+            GetAce(dacl, i, &mut ace)?;
+            let header = &*ace.cast::<ACE_HEADER>();
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE || header.AceFlags & INHERIT_ONLY_ACE != 0
+            {
+                continue;
+            }
+            let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+            let sid = PSID((&raw const allowed.SidStart).cast_mut().cast());
+            out.push((sid_to_string(sid)?, allowed.Mask));
+        }
+    }
+    Ok(out)
+}
+
+/// Check that only SYSTEM, Administrators and TrustedInstaller own or can
+/// change `path`. Used before the launcher is told to run a file as SYSTEM.
+pub fn check_admin_only(path: &Path) -> anyhow::Result<()> {
+    let mut owner = PSID::default();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut psd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: out pointers are valid; psd is freed with LocalFree.
+    let err = unsafe {
+        GetNamedSecurityInfoW(
+            &HSTRING::from(path.as_os_str()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            Some(&mut dacl),
+            None,
+            &mut psd,
+        )
+    };
+    anyhow::ensure!(
+        err.is_ok(),
+        "{}: cannot read its permissions",
+        path.display()
+    );
+    let result = (|| {
+        anyhow::ensure!(!dacl.is_null(), "{}: has no DACL", path.display());
+        let owner = sid_to_string(owner)?;
+        anyhow::ensure!(
+            TRUSTED.contains(&owner.as_str()),
+            "{}: owned by {owner}, not by SYSTEM or Administrators",
+            path.display()
+        );
+        // SAFETY: dacl points into psd, which is still allocated.
+        for (sid, mask) in unsafe { allow_aces(dacl)? } {
+            anyhow::ensure!(
+                mask & WRITE_RIGHTS == 0 || TRUSTED.contains(&sid.as_str()),
+                "{}: {sid} may change it; only SYSTEM and Administrators may",
+                path.display()
+            );
+        }
+        Ok(())
+    })();
+    // SAFETY: psd was allocated by GetNamedSecurityInfoW.
+    unsafe { LocalFree(Some(HLOCAL(psd.0))) };
+    result
+}
+
 fn sid_to_string(sid: PSID) -> anyhow::Result<String> {
     let mut s = PWSTR::null();
     // SAFETY: sid is valid for the duration of the call; s is freed with LocalFree.
     unsafe {
         ConvertSidToStringSidW(sid, &mut s)?;
-        let out = s.to_string()?;
+        let out = s.to_string();
         LocalFree(Some(HLOCAL(s.0.cast())));
-        Ok(out)
+        Ok(out?)
+    }
+}
+
+/// The process token, closed on drop.
+struct Token(HANDLE);
+
+impl Token {
+    fn current() -> anyhow::Result<Token> {
+        let mut token = HANDLE::default();
+        // SAFETY: valid out pointer.
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)? };
+        Ok(Token(token))
+    }
+}
+
+impl Drop for Token {
+    fn drop(&mut self) {
+        // SAFETY: the handle was opened by OpenProcessToken.
+        let _ = unsafe { CloseHandle(self.0) };
     }
 }
 
 /// The SID of the user this process runs as.
 pub fn current_user_sid() -> anyhow::Result<String> {
-    // SAFETY: standard token query with properly sized buffers.
+    let token = Token::current()?;
+    // SAFETY: two-call pattern with a buffer of the reported size.
     unsafe {
-        let mut token = HANDLE::default();
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;
         let mut needed = 0u32;
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+        let _ = GetTokenInformation(token.0, TokenUser, None, 0, &mut needed);
         let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
         GetTokenInformation(
-            token,
+            token.0,
             TokenUser,
             Some(buf.as_mut_ptr().cast()),
             needed,
             &mut needed,
         )?;
-        let _ = windows::Win32::Foundation::CloseHandle(token);
         let user = &*buf.as_ptr().cast::<TOKEN_USER>();
         sid_to_string(user.User.Sid)
     }
+}
+
+/// Whether this process runs elevated.
+pub fn is_elevated() -> bool {
+    let Ok(token) = Token::current() else {
+        return false;
+    };
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut needed = 0u32;
+    // SAFETY: the buffer is a properly sized TOKEN_ELEVATION.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenElevation,
+            Some((&raw mut elevation).cast()),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut needed,
+        )
+    };
+    ok.is_ok() && elevation.TokenIsElevated != 0
 }
 
 /// The SID of an account name such as `DOMAIN\user`.
@@ -196,12 +361,29 @@ mod tests {
             SecurityDescriptor::from_sddl("D:P(A;;FA;;;WD)").is_err(),
             "no owner/group"
         );
+        assert!(
+            SecurityDescriptor::from_sddl("O:BAG:BA").is_err(),
+            "no DACL"
+        );
         assert!(SecurityDescriptor::from_sddl("O:BAG:BAD:P(A;;FA;;;WD)").is_ok());
+        assert!(SecurityDescriptor::for_files("O:BAG:BAD:P(A;;FA;;;WD)").is_err());
+        assert!(SecurityDescriptor::for_files("O:BAG:BAD:P(A;;FRFX;;;WD)").is_ok());
     }
 
     #[test]
     fn account_lookup() {
         assert_eq!(account_sid("NT AUTHORITY\\SYSTEM").unwrap(), "S-1-5-18");
         assert!(account_sid("no-such-user-zz9").is_err());
+    }
+
+    #[test]
+    fn admin_only_check() {
+        let windows = std::env::var("SystemRoot").unwrap();
+        check_admin_only(&Path::new(&windows).join(r"System32\notepad.exe")).unwrap();
+        let tmp = std::env::temp_dir();
+        assert!(
+            check_admin_only(&tmp).is_err(),
+            "a user temp folder is user-writable"
+        );
     }
 }

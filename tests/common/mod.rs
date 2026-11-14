@@ -19,14 +19,34 @@ pub fn image_bytes(name: &str) -> Vec<u8> {
     zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap()
 }
 
-/// Write bytes to a fresh file in the test temp dir.
-pub fn write_temp(tag: &str, data: &[u8]) -> PathBuf {
+/// A file in the test temp dir, deleted on drop.
+pub struct TempFile(PathBuf);
+
+impl std::ops::Deref for TempFile {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+pub fn temp_path(tag: &str) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let path = dir.join(format!("{tag}-{}-{n}.img", std::process::id()));
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{tag}-{}-{n}", std::process::id()))
+}
+
+/// Write bytes to a fresh file in the test temp dir.
+pub fn write_temp(tag: &str, data: &[u8]) -> TempFile {
+    let path = temp_path(tag).with_extension("img");
     std::fs::write(&path, data).unwrap();
-    path
+    TempFile(path)
 }
 
 pub fn open(path: &Path, part: Option<&str>) -> (Volume, String) {

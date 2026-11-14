@@ -126,7 +126,7 @@ each with a `ChangeLog.md` line and a message fit for an upstream PR. With tests
   - Characters Windows forbids (`"*:<>?\|`, 0x01-0x1F) map to U+F000 + char (Cygwin convention),
     as do a trailing space or dot (not for `.` and `..`).
   - Non-UTF-8 bytes map to U+F100 + byte, or with `--charset latin1` decode as Latin-1.
-  - Reverse lookup tries the mapped meaning first, then the literal one.
+  - The mapping is never reversed: directory tables are keyed by the mapped name.
     Two UFS names mapping to one Windows name: the listing keeps one and logs the other.
   - DOS device names (`NUL`, `CON`, ...) are documented as a limitation.
 - Attributes:
@@ -167,8 +167,9 @@ each with a `ChangeLog.md` line and a message fit for an upstream PR. With tests
     Buffer: IO_REPARSE_TAG_SYMLINK, SubstituteName and PrintName, `/` -> `\`, names mapped,
     SYMLINK_FLAG_RELATIVE; absolute targets become `\...` (volume-relative).
   - All writing callbacks (`create`, `overwrite`, `write`, `set_basic_info`, `set_file_size`, `set_delete`,
-    `rename`, `set_security`, `set_reparse_point`, `delete_reparse_point`, `set_volume_label`, `flush`)
+    `rename`, `set_security`, `set_reparse_point`, `delete_reparse_point`, `set_volume_label`)
     return STATUS_MEDIA_WRITE_PROTECTED. `read_only_volume` itself enforces nothing.
+    `flush` succeeds: there is nothing to flush.
 - Errors are explicit NTSTATUS values: ENOENT -> OBJECT_NAME_NOT_FOUND, ENOTDIR -> OBJECT_PATH_NOT_FOUND,
   DeviceError CRC -> DEVICE_DATA_ERROR, other DeviceError -> IO_DEVICE_ERROR, device gone ->
   DEVICE_NOT_CONNECTED, everything else -> FILE_CORRUPT_ERROR. A failed read fails only that request.

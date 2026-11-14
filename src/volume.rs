@@ -14,8 +14,8 @@ use crate::partition::{Candidate, describe_flags};
 
 /// Directory entries kept in the cache, over all directories.
 const DIR_CACHE_ENTRIES: usize = 200_000;
-/// Symlinks followed while resolving one symlink target.
-const MAX_LINK_DEPTH: u32 = 32;
+/// Symlinks followed while resolving one path, in total (MAXSYMLINKS on FreeBSD).
+const MAX_LINKS: u32 = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -72,6 +72,8 @@ pub struct Entry {
 pub struct DirTable {
     pub entries: Vec<Entry>,
     pub parent: InodeNum,
+    /// Entries left out because their Windows name clashes with another one.
+    pub hidden: usize,
     exact: HashMap<Vec<u16>, usize>,
     folded: HashMap<String, (usize, u32)>,
     raw: HashMap<Vec<u8>, usize>,
@@ -86,6 +88,7 @@ impl DirTable {
         let mut table = DirTable {
             entries: Vec::with_capacity(items.len()),
             parent: dir,
+            hidden: 0,
             exact: HashMap::with_capacity(items.len()),
             folded: HashMap::new(),
             raw: HashMap::with_capacity(items.len()),
@@ -111,6 +114,7 @@ impl DirTable {
                     "dir {dir}: \"{}\" has the same Windows name as another entry, hidden",
                     names::display(&raw)
                 );
+                table.hidden += 1;
                 continue;
             }
             let idx = table.entries.len();
@@ -235,8 +239,10 @@ impl Volume {
         let mut ufs: MutexGuard<'_, _> = self.ufs.lock().unwrap_or_else(PoisonError::into_inner);
         self.dev.take_last_error();
         f(&mut ufs).map_err(|e| {
+            // Only an EIO or an errno-less error can stand for a device failure.
+            let replaceable = matches!(e.raw_os_error(), None | Some(5));
             let e = match (device_error(&e), self.dev.take_last_error()) {
-                (None, Some(d)) => io::Error::other::<DeviceError>(d),
+                (None, Some(d)) if replaceable => io::Error::other::<DeviceError>(d),
                 _ => e,
             };
             Error::Io(e)
@@ -267,20 +273,28 @@ impl Volume {
         let mut cache = self.dirs.lock().unwrap_or_else(PoisonError::into_inner);
         cache.clock += 1;
         let clock = cache.clock;
-        cache.entries += table.entries.len();
+        // Every table costs at least one entry, so empty directories are bounded too.
+        let cost = |t: &DirTable| t.entries.len() + 1;
+        cache.entries += cost(&table);
         if let Some((old, _)) = cache.dirs.insert(inr.get(), (table.clone(), clock)) {
-            cache.entries -= old.entries.len();
+            cache.entries -= cost(&old);
         }
-        while cache.entries > DIR_CACHE_ENTRIES && cache.dirs.len() > 1 {
-            let oldest = cache
+        if cache.entries > DIR_CACHE_ENTRIES {
+            // Evict the oldest tables down to 90 %, sorting once.
+            let mut ages: Vec<(u64, u32)> = cache
                 .dirs
                 .iter()
                 .filter(|(k, _)| **k != inr.get())
-                .min_by_key(|(_, (_, used))| *used)
-                .map(|(k, _)| *k);
-            let Some(oldest) = oldest else { break };
-            if let Some((old, _)) = cache.dirs.remove(&oldest) {
-                cache.entries -= old.entries.len();
+                .map(|(k, (_, used))| (*used, *k))
+                .collect();
+            ages.sort_unstable();
+            for (_, k) in ages {
+                if cache.entries <= DIR_CACHE_ENTRIES / 10 * 9 {
+                    break;
+                }
+                if let Some((old, _)) = cache.dirs.remove(&k) {
+                    cache.entries -= cost(&old);
+                }
             }
         }
         Ok(table)
@@ -356,7 +370,7 @@ impl Volume {
             attr.link_to_dir = self
                 .readlink(node.inr)
                 .ok()
-                .and_then(|target| self.resolve_target(node.parent, &target, 0))
+                .and_then(|target| self.resolve_target(node.parent, &target))
                 .is_some_and(|kind| kind == InodeType::Directory);
         }
         Ok(attr)
@@ -402,48 +416,69 @@ impl Volume {
     }
 
     /// Follow a symlink target from directory `dir`; the kind it ends at.
-    fn resolve_target(&self, dir: InodeNum, target: &[u8], depth: u32) -> Option<InodeType> {
-        self.resolve_inode(dir, target, depth).map(|(_, kind)| kind)
+    fn resolve_target(&self, dir: InodeNum, target: &[u8]) -> Option<InodeType> {
+        let mut budget = MAX_LINKS;
+        self.resolve_inode(dir, target, &mut budget)
+            .map(|(_, kind)| kind)
     }
 
+    /// Resolve a path typed by the user: UFS names, `/` or `\` separators,
+    /// relative to the root. `.`, `..` and symlinks are followed, as a shell would.
+    pub fn resolve_path(&self, path: &str) -> Result<Node> {
+        let path = path.replace('\\', "/");
+        let mut budget = MAX_LINKS;
+        let (inr, kind) = self
+            .resolve_inode(
+                InodeNum::ROOT,
+                path.trim_start_matches('/').as_bytes(),
+                &mut budget,
+            )
+            .ok_or(Error::NotFound)?;
+        Ok(Node {
+            inr,
+            kind,
+            parent: InodeNum::ROOT,
+        })
+    }
+
+    /// Follow `target` from `dir`. `budget` caps the symlinks followed in
+    /// total, over all nesting levels.
     fn resolve_inode(
         &self,
         mut dir: InodeNum,
         target: &[u8],
-        depth: u32,
+        budget: &mut u32,
     ) -> Option<(InodeNum, InodeType)> {
-        if depth > MAX_LINK_DEPTH {
-            return None;
-        }
         let mut target = target;
         if target.first() == Some(&b'/') {
             target = self.strip_fsmnt(target);
             dir = InodeNum::ROOT;
         }
-        let comps: Vec<&[u8]> = target.split(|&c| c == b'/').collect();
+        let comps: Vec<&[u8]> = target
+            .split(|&c| c == b'/')
+            .filter(|c| !c.is_empty() && *c != b".")
+            .collect();
         for (i, comp) in comps.iter().enumerate() {
-            let last = comps[i + 1..].iter().all(|c| c.is_empty() || *c == b".");
-            match *comp {
-                b"" | b"." => continue,
-                b".." => dir = self.dir(dir).ok()?.parent,
-                name => {
-                    let table = self.dir(dir).ok()?;
-                    let entry = table.find_raw(name)?;
-                    let (inr, kind) = if entry.kind == InodeType::Symlink {
-                        let link = self.readlink(entry.inr).ok()?;
-                        self.resolve_inode(dir, &link, depth + 1)?
-                    } else {
-                        (entry.inr, entry.kind)
-                    };
-                    if last {
-                        return Some((inr, kind));
-                    }
-                    if kind != InodeType::Directory {
-                        return None;
-                    }
-                    dir = inr;
-                }
+            if *comp == b".." {
+                dir = self.dir(dir).ok()?.parent;
+                continue;
             }
+            let table = self.dir(dir).ok()?;
+            let entry = table.find_raw(comp)?;
+            let (inr, kind) = if entry.kind == InodeType::Symlink {
+                *budget = budget.checked_sub(1)?;
+                let link = self.readlink(entry.inr).ok()?;
+                self.resolve_inode(dir, &link, budget)?
+            } else {
+                (entry.inr, entry.kind)
+            };
+            if i + 1 == comps.len() {
+                return Some((inr, kind));
+            }
+            if kind != InodeType::Directory {
+                return None;
+            }
+            dir = inr;
         }
         Some((dir, InodeType::Directory))
     }
@@ -461,7 +496,10 @@ impl Volume {
         if absolute {
             out.push(u16::from(b'\\'));
         }
-        for comp in target.split(|&c| c == b'/').filter(|c| !c.is_empty()) {
+        for comp in target
+            .split(|&c| c == b'/')
+            .filter(|c| !c.is_empty() && *c != b".")
+        {
             if !out.is_empty() && out.last() != Some(&u16::from(b'\\')) {
                 out.push(u16::from(b'\\'));
             }
@@ -475,5 +513,57 @@ impl Volume {
             out.push(u16::from(b'.'));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn w(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn table_rules() {
+        let root = InodeNum::ROOT;
+        let items = vec![
+            (b".".to_vec(), root, InodeType::Directory),
+            (b"..".to_vec(), root, InodeType::Directory),
+            (b"Makefile".to_vec(), root, InodeType::RegularFile),
+            (b"makefile".to_vec(), root, InodeType::RegularFile),
+            (b"README".to_vec(), root, InodeType::RegularFile),
+            (b"a:".to_vec(), root, InodeType::RegularFile),
+            (
+                "a\u{f03a}".as_bytes().to_vec(),
+                root,
+                InodeType::RegularFile,
+            ),
+            (b"tty".to_vec(), root, InodeType::CharDevice),
+            (b"pipe".to_vec(), root, InodeType::NamedPipe),
+        ];
+        let t = DirTable::build(root, items, Charset::Utf8);
+        let names: Vec<String> = t
+            .entries
+            .iter()
+            .map(|e| String::from_utf16(&e.name).unwrap())
+            .collect();
+        assert_eq!(names, ["Makefile", "makefile", "README", "a\u{f03a}"]);
+        assert_eq!(
+            t.hidden, 1,
+            "the literal U+F03A name clashes with the mapped ':'"
+        );
+        assert!(t.find(&w("Makefile")).is_some());
+        assert!(t.find(&w("MAKEFILE")).is_none(), "ambiguous fold must miss");
+        assert_eq!(t.find(&w("readme")).unwrap().raw, b"README");
+        assert!(t.find_raw(b"a:").is_some());
+        assert!(t.find(&w("tty")).is_none());
+    }
+
+    #[test]
+    fn filetime_edges() {
+        assert_eq!(filetime(UNIX_EPOCH), 116_444_736_000_000_000);
+        let before = UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert_eq!(filetime(before), 116_444_736_000_000_000 - 10_000_000);
     }
 }

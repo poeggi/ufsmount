@@ -327,20 +327,24 @@ fn read(dev: &Device, offset: u64, len: u64) -> Option<Vec<u8>> {
     }
 }
 
-fn read_gpt(dev: &Device, sector: u64) -> Option<Vec<GptEntry>> {
-    let last_lba = dev.len() / sector - 1;
-    for lba in [1, last_lba] {
+/// The GPT entries, from the primary header or, if allowed, the backup at the last LBA.
+fn read_gpt(dev: &Device, sector: u64, try_backup: bool) -> Option<Vec<GptEntry>> {
+    let sectors = dev.len() / sector;
+    if sectors < 3 {
+        return None;
+    }
+    let lbas: &[u64] = if try_backup { &[1, sectors - 1] } else { &[1] };
+    for &lba in lbas {
         let Some(hdr) = read(dev, lba * sector, sector) else {
             continue;
         };
         let Some((entry_lba, count, size, crc)) = parse_gpt_header(&hdr) else {
             continue;
         };
-        let Some(array) = read(
-            dev,
-            entry_lba.checked_mul(sector)?,
-            u64::from(count) * u64::from(size),
-        ) else {
+        let Some(offset) = entry_lba.checked_mul(sector) else {
+            continue;
+        };
+        let Some(array) = read(dev, offset, u64::from(count) * u64::from(size)) else {
             continue;
         };
         if let Some(entries) = parse_gpt_entries(&array, size, crc) {
@@ -353,64 +357,99 @@ fn read_gpt(dev: &Device, sector: u64) -> Option<Vec<GptEntry>> {
     None
 }
 
-/// Table candidates without file system checks.
+/// A table range cut to the device: `None` if it starts outside, else its usable length.
+/// Some USB bridges report a few sectors less than the disk was partitioned with.
+fn clamp(dev: &Device, start: u64, len: u64, what: &str) -> Option<u64> {
+    if start >= dev.len() {
+        log::warn!(
+            "{}: {what} starts past the end of the disk, ignored",
+            dev.name()
+        );
+        return None;
+    }
+    let avail = dev.len() - start;
+    if len > avail {
+        log::warn!(
+            "{}: {what} runs past the end of the disk, cut to the disk size",
+            dev.name()
+        );
+    }
+    Some(len.min(avail))
+}
+
+/// Partitions of a BSD label at sector 1 of `base`.
+fn label_candidates(
+    dev: &Device,
+    sector: u64,
+    base: u64,
+    base_len: u64,
+    prefix: &str,
+    origin: &str,
+) -> Vec<Candidate> {
+    let Some(buf) = read(dev, base + sector, sector.max(512)) else {
+        return Vec::new();
+    };
+    let Some(parts) = parse_label(&buf, sector) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for p in parts {
+        let (Some(rel), Some(len)) = (p.offset.checked_mul(sector), p.sectors.checked_mul(sector))
+        else {
+            continue;
+        };
+        let Some(mut start) = rel.checked_add(base) else {
+            continue;
+        };
+        // Old labels count offsets from the disk start even when c is at 0.
+        if start.saturating_add(len) > base.saturating_add(base_len) && base > 0 && rel >= base {
+            start = rel;
+        }
+        let what = format!("label partition {prefix}{}", p.letter);
+        let Some(len) = clamp(dev, start, len, &what) else {
+            continue;
+        };
+        out.push(Candidate {
+            id: format!("{prefix}{}", p.letter),
+            start,
+            len,
+            origin: format!(
+                "{origin}BSD label partition {} (fstype {})",
+                p.letter, p.fstype
+            ),
+            fs: FsKind::None,
+        });
+    }
+    out
+}
+
+/// Table candidates without file system checks: labels first, then GPT
+/// partitions and MBR slices, then the whole disk.
 fn table_candidates(dev: &Device, sector: u64) -> Vec<Candidate> {
     let mut labels = Vec::new();
     let mut others = Vec::new();
-    let in_device =
-        |start: u64, len: u64| start.checked_add(len).is_some_and(|end| end <= dev.len());
 
-    let add_label =
-        |labels: &mut Vec<Candidate>, base: u64, base_len: u64, prefix: &str, origin: &str| {
-            let Some(buf) = read(dev, base + sector, sector.max(512)) else {
-                return;
-            };
-            let Some(parts) = parse_label(&buf, sector) else {
-                return;
-            };
-            for p in parts {
-                let (Some(start), Some(len)) = (
-                    p.offset
-                        .checked_mul(sector)
-                        .and_then(|o| o.checked_add(base)),
-                    p.sectors.checked_mul(sector),
-                ) else {
-                    continue;
-                };
-                if start + len > base + base_len || !in_device(start, len) {
-                    log::warn!(
-                        "{}: label partition {} lies outside its slice, ignored",
-                        dev.name(),
-                        p.letter
-                    );
-                    continue;
-                }
-                labels.push(Candidate {
-                    id: format!("{prefix}{}", p.letter),
-                    start,
-                    len,
-                    origin: format!(
-                        "{origin}BSD label partition {} (fstype {})",
-                        p.letter, p.fstype
-                    ),
-                    fs: FsKind::None,
-                });
-            }
-        };
+    let mbr = read(dev, 0, sector.max(512))
+        .and_then(|s| parse_mbr(&s))
+        .unwrap_or_default();
+    let protective = mbr.iter().any(|e| e.kind == 0xee);
+    let slices: Vec<&MbrEntry> = mbr.iter().filter(|e| e.kind != 0xee).collect();
 
-    if let Some(entries) = read_gpt(dev, sector) {
+    // A stale GPT next to a real MBR is harmless: every candidate is checked.
+    if let Some(entries) = read_gpt(dev, sector, protective || slices.is_empty()) {
         for e in entries {
-            let Some(len) = e
-                .last_lba
-                .checked_sub(e.first_lba)
-                .and_then(|n| (n + 1).checked_mul(sector))
-            else {
+            let (Some(start), Some(len)) = (
+                e.first_lba.checked_mul(sector),
+                e.last_lba
+                    .checked_sub(e.first_lba)
+                    .and_then(|n| n.checked_add(1))
+                    .and_then(|n| n.checked_mul(sector)),
+            ) else {
                 continue;
             };
-            let start = e.first_lba.saturating_mul(sector);
-            if !in_device(start, len) {
+            let Some(len) = clamp(dev, start, len, &format!("GPT partition {}", e.index)) else {
                 continue;
-            }
+            };
             let kind = if e.type_guid == GPT_FREEBSD_UFS {
                 "freebsd-ufs".to_string()
             } else {
@@ -424,48 +463,36 @@ fn table_candidates(dev: &Device, sector: u64) -> Vec<Candidate> {
                 fs: FsKind::None,
             });
         }
-    } else if let Some(sector0) = read(dev, 0, sector.max(512))
-        && let Some(entries) = parse_mbr(&sector0)
-    {
-        for e in entries {
-            if e.kind == 0xee {
-                continue;
-            }
-            let (Some(start), Some(len)) = (
-                e.start_lba.checked_mul(sector),
-                e.sectors.checked_mul(sector),
-            ) else {
-                continue;
-            };
-            if !in_device(start, len) {
-                log::warn!(
-                    "{}: MBR slice {} lies outside the disk, ignored",
-                    dev.name(),
-                    e.index
-                );
-                continue;
-            }
-            let id = format!("s{}", e.index);
-            if e.kind == 0xa5 {
-                add_label(
-                    &mut labels,
-                    start,
-                    len,
-                    &id,
-                    &format!("slice {}, ", e.index),
-                );
-            }
-            others.push(Candidate {
-                id,
-                start,
-                len,
-                origin: format!("MBR slice {} (type 0x{:02x})", e.index, e.kind),
-                fs: FsKind::None,
-            });
-        }
+    }
+    for e in slices {
+        let (Some(start), Some(len)) = (
+            e.start_lba.checked_mul(sector),
+            e.sectors.checked_mul(sector),
+        ) else {
+            continue;
+        };
+        let Some(len) = clamp(dev, start, len, &format!("MBR slice {}", e.index)) else {
+            continue;
+        };
+        let id = format!("s{}", e.index);
+        labels.extend(label_candidates(
+            dev,
+            sector,
+            start,
+            len,
+            &id,
+            &format!("slice {}, ", e.index),
+        ));
+        others.push(Candidate {
+            id,
+            start,
+            len,
+            origin: format!("MBR slice {} (type 0x{:02x})", e.index, e.kind),
+            fs: FsKind::None,
+        });
     }
     // A label at the start of the disk, without slices ("dangerously dedicated").
-    add_label(&mut labels, 0, dev.len(), "", "");
+    labels.extend(label_candidates(dev, sector, 0, dev.len(), "", ""));
 
     labels.extend(others);
     labels.push(Candidate {
@@ -491,18 +518,8 @@ pub fn probe_fs(dev: &Arc<Device>, start: u64, len: u64) -> FsKind {
         let big_endian = u32::from_be_bytes(magic) == FS_UFS2_MAGIC;
         if big_endian || u32::from_le_bytes(magic) == FS_UFS2_MAGIC {
             let reader = PartitionReader::new(dev.clone(), start, len, 512);
-            match Ufs::new(BlockReader::new(reader, 512, false)) {
-                Ok(ufs) => {
-                    let info = ufs.info();
-                    if info.frags.saturating_mul(u64::from(info.fsize)) > len {
-                        log::warn!(
-                            "{}: UFS2 at byte {start} is larger than its partition, ignored",
-                            dev.name()
-                        );
-                        return FsKind::None;
-                    }
-                    return FsKind::Ufs2(Box::new(UfsFacts { info, big_endian }));
-                }
+            let info = match Ufs::new(BlockReader::new(reader, 512, false)) {
+                Ok(ufs) => ufs.info(),
                 Err(e) => {
                     log::warn!(
                         "{}: UFS2 superblock at byte {start} rejected: {e}",
@@ -510,7 +527,25 @@ pub fn probe_fs(dev: &Arc<Device>, start: u64, len: u64) -> FsKind {
                     );
                     return FsKind::None;
                 }
+            };
+            if !(4096..=65536).contains(&info.bsize) || !(512..=info.bsize).contains(&info.fsize) {
+                log::warn!(
+                    "{}: UFS2 at byte {start} has an unusable block size {}/{}",
+                    dev.name(),
+                    info.bsize,
+                    info.fsize
+                );
+                return FsKind::None;
             }
+            let fs_len = info.frags.saturating_mul(u64::from(info.fsize));
+            if fs_len > dev.len() - start {
+                log::warn!(
+                    "{}: UFS2 at byte {start} is larger than the disk, ignored",
+                    dev.name()
+                );
+                return FsKind::None;
+            }
+            return FsKind::Ufs2(Box::new(UfsFacts { info, big_endian }));
         }
     }
     if let Some(magic) = read_magic(dev, start + SBLOCK_UFS1 + MAGIC_OFFSET)
@@ -529,7 +564,7 @@ pub fn probe(dev: &Arc<Device>) -> Vec<Candidate> {
     if dev.sector_size() == 512 {
         sizes.push(4096);
     }
-    let mut result = Vec::new();
+    let mut first = None;
     for sector in sizes {
         let mut cands = table_candidates(dev, sector);
         let mut seen = Vec::new();
@@ -538,17 +573,27 @@ pub fn probe(dev: &Arc<Device>) -> Vec<Candidate> {
                 continue;
             }
             c.fs = probe_fs(dev, c.start, c.len);
+            if let FsKind::Ufs2(facts) = &c.fs {
+                let fs_len = facts.info.frags * u64::from(facts.info.fsize);
+                if fs_len > c.len {
+                    log::warn!(
+                        "{}: the file system in {} is larger than its partition entry; using its own size",
+                        dev.name(),
+                        c.id
+                    );
+                    c.len = fs_len;
+                }
+            }
             if !matches!(c.fs, FsKind::None) {
                 seen.push(c.start);
             }
         }
-        let found_table = cands.len() > 1;
-        result = cands;
-        if found_table || result.iter().any(|c| c.ufs2().is_some()) {
-            break;
+        if cands.iter().any(|c| c.ufs2().is_some()) {
+            return cands;
         }
+        first.get_or_insert(cands);
     }
-    result
+    first.unwrap_or_default()
 }
 
 /// Pick the partition to use: the one named by `part`, or the only UFS2 one.

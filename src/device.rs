@@ -11,7 +11,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::windows::fs::{FileExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
@@ -26,13 +26,19 @@ pub const CHUNK: u64 = 64 * 1024;
 /// Number of cached chunks (64 MiB).
 const CACHE_CHUNKS: usize = 1024;
 
+const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_NOT_READY: u32 = 21;
 const ERROR_CRC: u32 = 23;
+const ERROR_SECTOR_NOT_FOUND: u32 = 27;
+const ERROR_READ_FAULT: u32 = 30;
+const ERROR_HANDLE_EOF: u32 = 38;
 const ERROR_DEV_NOT_EXIST: u32 = 55;
 const ERROR_NO_SUCH_DEVICE: u32 = 433;
 const ERROR_MEDIA_CHANGED: u32 = 1110;
+const ERROR_IO_DEVICE: u32 = 1117;
 const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
+const ERROR_DEVICE_REMOVED: u32 = 1617;
 
 /// A failed read from the disk, with the Win32 error code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -47,17 +53,22 @@ impl DeviceError {
     pub fn is_gone(&self) -> bool {
         matches!(
             self.code,
-            ERROR_NOT_READY
+            ERROR_FILE_NOT_FOUND
+                | ERROR_NOT_READY
                 | ERROR_DEV_NOT_EXIST
                 | ERROR_NO_SUCH_DEVICE
                 | ERROR_MEDIA_CHANGED
                 | ERROR_DEVICE_NOT_CONNECTED
+                | ERROR_DEVICE_REMOVED
         )
     }
 
     /// The data on the medium is unreadable (bad sector).
     pub fn is_media_error(&self) -> bool {
-        self.code == ERROR_CRC
+        matches!(
+            self.code,
+            ERROR_CRC | ERROR_SECTOR_NOT_FOUND | ERROR_READ_FAULT | ERROR_IO_DEVICE
+        )
     }
 }
 
@@ -80,10 +91,16 @@ pub trait RawDisk: Send + Sync {
     /// Fill `buf` from `offset`. Offset and length are multiples of the sector
     /// size, except for the tail of an image file. Returns a Win32 error code.
     fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), u32>;
+
+    /// Whether the device still answers. Asked after an unexpected error.
+    fn is_alive(&self) -> bool {
+        true
+    }
 }
 
 struct OsDisk {
     file: File,
+    is_disk: bool,
 }
 
 impl RawDisk for OsDisk {
@@ -91,12 +108,16 @@ impl RawDisk for OsDisk {
         let mut done = 0;
         while done < buf.len() {
             match self.file.seek_read(&mut buf[done..], offset + done as u64) {
-                Ok(0) => return Err(ERROR_CRC),
+                Ok(0) => return Err(ERROR_HANDLE_EOF),
                 Ok(n) => done += n,
-                Err(e) => return Err(e.raw_os_error().unwrap_or(ERROR_CRC as i32) as u32),
+                Err(e) => return Err(e.raw_os_error().unwrap_or(ERROR_READ_FAULT as i32) as u32),
             }
         }
         Ok(())
+    }
+
+    fn is_alive(&self) -> bool {
+        !self.is_disk || disk_geometry(&self.file).is_ok()
     }
 }
 
@@ -185,18 +206,22 @@ impl Cache {
     }
 
     fn put(&mut self, idx: u64, data: Arc<[u8]>) {
-        if self.chunks.len() >= CACHE_CHUNKS
-            && let Some(&oldest) = self
-                .chunks
-                .iter()
-                .min_by_key(|(_, (_, used))| *used)
-                .map(|(k, _)| k)
-        {
-            self.chunks.remove(&oldest);
+        if self.chunks.len() >= CACHE_CHUNKS {
+            // Drop the oldest eighth in one go, so a full cache does not scan on every miss.
+            let mut ages: Vec<(u64, u64)> =
+                self.chunks.iter().map(|(k, (_, u))| (*u, *k)).collect();
+            ages.sort_unstable();
+            for (_, k) in ages.iter().take(CACHE_CHUNKS / 8) {
+                self.chunks.remove(k);
+            }
         }
         self.clock += 1;
         self.chunks.insert(idx, (data, self.clock));
     }
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A disk or image, opened read-only.
@@ -204,9 +229,14 @@ pub struct Device {
     raw: Box<dyn RawDisk>,
     name: String,
     len: u64,
-    sector: u64,
+    /// Unit of raw reads: the sector size the device reports.
+    io_sector: u64,
+    /// Sector size for partition tables; differs only with `--sector-size`.
+    table_sector: u64,
     cache: Mutex<Cache>,
-    bad_sectors: Mutex<HashSet<u64>>,
+    /// Sectors that failed with a media error, and the error code.
+    bad_sectors: Mutex<HashMap<u64, u32>>,
+    /// Chunks that hold a bad sector: read sector by sector.
     bad_chunks: Mutex<HashSet<u64>>,
     gone: AtomicBool,
     last_error: Mutex<Option<DeviceError>>,
@@ -231,22 +261,22 @@ impl Device {
                     anyhow::anyhow!("{path}: {e}")
                 }
             })?;
-        let (len, sector) = match source {
-            Source::PhysicalDrive(_) => disk_geometry(&file)
-                .map_err(|e| anyhow::anyhow!("{path}: cannot query the disk size: {e}"))?,
-            Source::Image(_) => (file.metadata()?.len(), 512),
+        let is_disk = matches!(source, Source::PhysicalDrive(_)) || file.metadata()?.len() == 0;
+        let (len, io_sector) = if is_disk {
+            disk_geometry(&file)
+                .map_err(|e| anyhow::anyhow!("{path}: cannot query the size: {e}"))?
+        } else {
+            (file.metadata()?.len(), 512)
         };
-        let sector = sector_override.map(u64::from).unwrap_or(sector);
+        anyhow::ensure!(len > 0, "{path} is empty");
+        let table_sector = sector_override.map(u64::from).unwrap_or(io_sector);
         anyhow::ensure!(
-            sector.is_power_of_two() && (512..=4096).contains(&sector),
-            "unsupported sector size {sector}"
+            table_sector.is_power_of_two() && (512..=4096).contains(&table_sector),
+            "unsupported sector size {table_sector}"
         );
-        Ok(Device::from_raw(
-            Box::new(OsDisk { file }),
-            path,
-            len,
-            sector,
-        ))
+        let mut dev = Device::from_raw(Box::new(OsDisk { file, is_disk }), path, len, io_sector);
+        dev.table_sector = table_sector;
+        Ok(dev)
     }
 
     /// Build a device on any [`RawDisk`], for example a test double.
@@ -255,12 +285,13 @@ impl Device {
             raw,
             name,
             len,
-            sector,
+            io_sector: sector,
+            table_sector: sector,
             cache: Mutex::new(Cache {
                 chunks: HashMap::new(),
                 clock: 0,
             }),
-            bad_sectors: Mutex::new(HashSet::new()),
+            bad_sectors: Mutex::new(HashMap::new()),
             bad_chunks: Mutex::new(HashSet::new()),
             gone: AtomicBool::new(false),
             last_error: Mutex::new(None),
@@ -279,8 +310,9 @@ impl Device {
         self.len == 0
     }
 
+    /// The sector size partition tables are read with.
     pub fn sector_size(&self) -> u64 {
-        self.sector
+        self.table_sector
     }
 
     pub fn is_gone(&self) -> bool {
@@ -289,21 +321,18 @@ impl Device {
 
     /// The most recent device error, if any. Cleared by this call.
     pub fn take_last_error(&self) -> Option<DeviceError> {
-        self.last_error
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
+        lock(&self.last_error).take()
     }
 
     fn fail(&self, code: u32, offset: u64) -> io::Error {
-        let err = DeviceError { code, offset };
+        let mut err = DeviceError { code, offset };
+        if !err.is_gone() && !err.is_media_error() && !self.raw.is_alive() {
+            err.code = ERROR_DEVICE_NOT_CONNECTED;
+        }
         if err.is_gone() && !self.gone.swap(true, Ordering::Relaxed) {
             log::error!("{}: the disk is gone ({err})", self.name);
         }
-        *self
-            .last_error
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(err);
+        *lock(&self.last_error) = Some(err);
         io::Error::other(err)
     }
 
@@ -327,7 +356,8 @@ impl Device {
             let chunk_start = idx * CHUNK;
             let from = (pos - chunk_start) as usize;
             let to = (end.min(chunk_start + CHUNK) - chunk_start) as usize;
-            let dst = &mut buf[(pos - offset) as usize..(pos - offset) as usize + (to - from)];
+            let at = (pos - offset) as usize;
+            let dst = &mut buf[at..at + (to - from)];
             match self.chunk(idx)? {
                 Some(data) => dst.copy_from_slice(&data[from..to]),
                 None => self.read_sectors(chunk_start + from as u64, dst)?,
@@ -337,27 +367,22 @@ impl Device {
         Ok(())
     }
 
-    /// The cached or freshly read chunk, or `None` if the chunk holds bad sectors.
+    /// The cached or freshly read chunk, or `None` if it must be read sector by sector.
     fn chunk(&self, idx: u64) -> io::Result<Option<Arc<[u8]>>> {
-        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(data) = cache.get(idx) {
+        if let Some(data) = lock(&self.cache).get(idx) {
             return Ok(Some(data));
         }
-        if self
-            .bad_chunks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(&idx)
-        {
+        if lock(&self.bad_chunks).contains(&idx) {
             return Ok(None);
         }
         let start = idx * CHUNK;
         let len = CHUNK.min(self.len - start) as usize;
         let mut buf = AlignedBuf::new(len);
+        // No lock is held here: a failing USB read can take seconds.
         match self.raw.read_exact_at(start, buf.as_mut_slice()) {
             Ok(()) => {
                 let data: Arc<[u8]> = Arc::from(&*buf.as_mut_slice());
-                cache.put(idx, data.clone());
+                lock(&self.cache).put(idx, data.clone());
                 Ok(Some(data))
             }
             Err(code) => {
@@ -372,31 +397,25 @@ impl Device {
                     "{}: chunk at byte {start} failed ({err}), reading sector by sector",
                     self.name
                 );
-                self.bad_chunks
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(idx);
+                if err.is_media_error() {
+                    lock(&self.bad_chunks).insert(idx);
+                }
                 Ok(None)
             }
         }
     }
 
-    /// Read a range sector by sector, uncached. Used inside chunks with bad sectors.
+    /// Read a range sector by sector, uncached. Used around bad sectors.
     fn read_sectors(&self, offset: u64, dst: &mut [u8]) -> io::Result<()> {
-        let sector = self.sector;
+        let sector = self.io_sector;
         let first = offset / sector;
         let last = (offset + dst.len() as u64 - 1) / sector;
         let mut buf = AlignedBuf::new(sector as usize);
         for s in first..=last {
             let s_start = s * sector;
             let s_len = sector.min(self.len - s_start) as usize;
-            if self
-                .bad_sectors
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains(&s)
-            {
-                return Err(self.fail(ERROR_CRC, s_start));
+            if let Some(&code) = lock(&self.bad_sectors).get(&s) {
+                return Err(self.fail(code, s_start));
             }
             let data = &mut buf.as_mut_slice()[..s_len];
             if let Err(code) = self.raw.read_exact_at(s_start, data) {
@@ -404,12 +423,9 @@ impl Device {
                     code,
                     offset: s_start,
                 };
-                if !err.is_gone() {
+                if err.is_media_error() {
                     log::error!("{}: unreadable sector {s} (byte {s_start})", self.name);
-                    self.bad_sectors
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(s);
+                    lock(&self.bad_sectors).insert(s, code);
                 }
                 return Err(self.fail(code, s_start));
             }
@@ -422,6 +438,7 @@ impl Device {
     }
 }
 
+/// Length in bytes and logical sector size of a disk or volume handle.
 fn disk_geometry(file: &File) -> io::Result<(u64, u64)> {
     let handle = HANDLE(file.as_raw_handle());
     let mut length = GET_LENGTH_INFORMATION::default();
@@ -442,7 +459,7 @@ fn disk_geometry(file: &File) -> io::Result<(u64, u64)> {
     .map_err(io::Error::other)?;
     let mut geometry = DISK_GEOMETRY_EX::default();
     // SAFETY: the output buffer is a properly sized DISK_GEOMETRY_EX.
-    unsafe {
+    let sector = match unsafe {
         DeviceIoControl(
             handle,
             IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
@@ -453,12 +470,11 @@ fn disk_geometry(file: &File) -> io::Result<(u64, u64)> {
             Some(&mut returned),
             None,
         )
-    }
-    .map_err(io::Error::other)?;
-    Ok((
-        length.Length as u64,
-        u64::from(geometry.Geometry.BytesPerSector),
-    ))
+    } {
+        Ok(()) => u64::from(geometry.Geometry.BytesPerSector),
+        Err(_) => 512,
+    };
+    Ok((length.Length as u64, sector))
 }
 
 /// One partition as a `Read + Seek` stream for rufs.
@@ -530,9 +546,9 @@ impl Write for PartitionReader {
     }
 }
 
-#[cfg(test)]
+#[doc(hidden)]
 pub mod testing {
-    //! A fake disk that enforces raw disk rules and injects faults.
+    //! A fake disk that enforces raw disk rules and injects faults. For tests.
 
     use super::*;
     use std::sync::atomic::AtomicUsize;
@@ -540,9 +556,10 @@ pub mod testing {
     pub struct FakeDisk {
         pub data: Vec<u8>,
         pub sector: u64,
-        pub bad: Vec<std::ops::Range<u64>>,
+        /// Byte ranges that fail, with the Win32 code.
+        pub bad: Vec<(std::ops::Range<u64>, u32)>,
         pub unplug_after: Option<usize>,
-        pub reads: AtomicUsize,
+        pub reads: Arc<AtomicUsize>,
     }
 
     impl FakeDisk {
@@ -552,7 +569,7 @@ pub mod testing {
                 sector,
                 bad: Vec::new(),
                 unplug_after: None,
-                reads: AtomicUsize::new(0),
+                reads: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -579,13 +596,22 @@ pub mod testing {
             assert_eq!(buf.as_ptr() as usize % 4096, 0, "unaligned buffer");
             let end = offset + buf.len() as u64;
             if end > self.data.len() as u64 {
-                return Err(27); // ERROR_SECTOR_NOT_FOUND
+                return Err(ERROR_SECTOR_NOT_FOUND);
             }
-            if self.bad.iter().any(|r| r.start < end && offset < r.end) {
-                return Err(ERROR_CRC);
+            if let Some((_, code)) = self
+                .bad
+                .iter()
+                .find(|(r, _)| r.start < end && offset < r.end)
+            {
+                return Err(*code);
             }
             buf.copy_from_slice(&self.data[offset as usize..end as usize]);
             Ok(())
+        }
+
+        fn is_alive(&self) -> bool {
+            self.unplug_after
+                .is_none_or(|after| self.reads.load(Ordering::Relaxed) < after)
         }
     }
 }
@@ -621,10 +647,23 @@ mod tests {
     }
 
     #[test]
+    fn chunks_are_cached() {
+        let disk = FakeDisk::new(pattern(4 * CHUNK as usize), 512);
+        let reads = disk.reads.clone();
+        let dev = disk.into_device();
+        let mut buf = vec![0; 100];
+        for _ in 0..5 {
+            dev.read(10, &mut buf).unwrap();
+        }
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn bad_sector_spares_neighbours() {
         let data = pattern(4 * CHUNK as usize);
         let mut disk = FakeDisk::new(data.clone(), 512);
-        disk.bad.push(CHUNK + 1024..CHUNK + 1536);
+        disk.bad.push((CHUNK + 1024..CHUNK + 1536, ERROR_CRC));
+        let reads = disk.reads.clone();
         let dev = disk.into_device();
 
         let mut buf = vec![0; 1024];
@@ -638,9 +677,28 @@ mod tests {
         assert_eq!(derr.offset, CHUNK + 1024);
         assert_eq!(dev.take_last_error(), Some(derr));
 
+        // The bad sector is not read again, and keeps its error code.
+        let before = reads.load(Ordering::Relaxed);
+        let err = dev.read(CHUNK + 1100, &mut buf).unwrap_err();
+        assert_eq!(device_error(&err).unwrap().code, ERROR_CRC);
+        assert_eq!(reads.load(Ordering::Relaxed), before);
+
         let mut buf = vec![0; 512];
         dev.read(CHUNK + 1536, &mut buf).unwrap();
         assert_eq!(buf, data[(CHUNK + 1536) as usize..(CHUNK + 2048) as usize]);
+    }
+
+    #[test]
+    fn transient_errors_are_not_remembered() {
+        let data = pattern(2 * CHUNK as usize);
+        let mut disk = FakeDisk::new(data.clone(), 512);
+        disk.bad.push((0..512, 121)); // ERROR_SEM_TIMEOUT
+        let dev = disk.into_device();
+        let mut buf = vec![0; 10];
+        assert!(dev.read(0, &mut buf).is_err());
+        assert!(!dev.is_gone());
+        assert!(lock(&dev.bad_sectors).is_empty());
+        assert!(lock(&dev.bad_chunks).is_empty());
     }
 
     #[test]
@@ -657,6 +715,17 @@ mod tests {
             dev.read(0, &mut buf).is_err(),
             "cached data is not served after unplug"
         );
+    }
+
+    #[test]
+    fn unknown_error_on_a_dead_device_means_gone() {
+        let mut disk = FakeDisk::new(pattern(2 * CHUNK as usize), 512);
+        disk.bad.push((0..CHUNK, 31)); // ERROR_GEN_FAILURE
+        disk.unplug_after = Some(1);
+        let dev = disk.into_device();
+        let mut buf = vec![0; 10];
+        assert!(dev.read(0, &mut buf).is_err());
+        assert!(dev.is_gone());
     }
 
     #[test]

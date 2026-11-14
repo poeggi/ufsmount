@@ -58,8 +58,8 @@ pub fn display(name: &[u8]) -> String {
     let mut s = String::new();
     for chunk in name.utf8_chunks() {
         for c in chunk.valid().chars() {
-            if (c as u32) < 0x20 {
-                s += &format!("\\x{:02x}", c as u32);
+            if c.is_control() {
+                s += &format!("\\u{{{:x}}}", c as u32);
             } else {
                 s.push(c);
             }

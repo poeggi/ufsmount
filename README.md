@@ -52,6 +52,8 @@ net use U: /delete
 - Names Windows cannot show (`:`, `?`, invalid UTF-8, ...) map to private-use characters.
   `--charset latin1` shows non-UTF-8 names as Latin-1.
 - Symlinks are Windows symlinks. Use `robocopy /XJ` or `/SL` to avoid loops.
+- Names are case-sensitive, as on FreeBSD. Opening a file in another case works if it is unique.
+  Wildcards such as `dir *.TXT` match case-sensitively.
 - Device nodes, fifos and sockets are hidden.
 
 ## Build

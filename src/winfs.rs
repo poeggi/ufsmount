@@ -2,14 +2,14 @@
 //! The WinFsp file system: read-only, every write path reports write protection.
 
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rufs::{InodeNum, InodeType};
 use windows::Win32::Foundation::{
     NTSTATUS, STATUS_BUFFER_TOO_SMALL, STATUS_DEVICE_DATA_ERROR, STATUS_DEVICE_NOT_CONNECTED,
     STATUS_END_OF_FILE, STATUS_FILE_CORRUPT_ERROR, STATUS_IO_DEVICE_ERROR,
     STATUS_MEDIA_WRITE_PROTECTED, STATUS_NOT_A_DIRECTORY, STATUS_NOT_A_REPARSE_POINT,
-    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
+    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_UNSUCCESSFUL,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -30,7 +30,7 @@ use winfsp::service::FileSystemServiceBuilder;
 use winfsp::{FspError, FspInit, U16CStr};
 
 use crate::device::device_error;
-use crate::security::{SecurityDescriptor, current_user_sid};
+use crate::security::{SecurityDescriptor, current_user_sid, is_elevated};
 use crate::volume::{self, Attr, Node, Volume};
 
 /// Oldest WinFsp accepted: 2.2.26286 (2026 Beta5). Older builds have kernel
@@ -40,9 +40,7 @@ pub const MIN_WINFSP: (u32, u32, u32) = (2, 2, 26286);
 const IO_REPARSE_TAG_SYMLINK: u32 = 0xa000_000c;
 const SYMLINK_FLAG_RELATIVE: u32 = 1;
 const FILE_DELETE_ON_CLOSE: u32 = 0x0000_1000;
-/// FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_WRITE_EA, FILE_DELETE_CHILD,
-/// FILE_WRITE_ATTRIBUTES, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE.
-const WRITE_ACCESS: u32 = 0x5000_0000 | 0x000d_0000 | 0x0156;
+const WRITE_ACCESS: u32 = crate::security::WRITE_RIGHTS;
 
 fn status(s: NTSTATUS) -> FspError {
     FspError::NTSTATUS(s.0)
@@ -571,47 +569,72 @@ pub fn build_host(
     )?)
 }
 
-/// `U:` or `U` becomes the Mount Manager form `\\.\U:`: a global drive, so the
-/// same user's non-elevated Explorer sees it too. Directories stay as they are.
-fn global_drive(mountpoint: &str) -> Option<String> {
+/// `U`, `U:` or `U:\` as `U:`; `None` for a directory.
+fn drive_letter(mountpoint: &str) -> Option<String> {
     let t = mountpoint.trim_end_matches(['\\', '/']);
-    let b = t.as_bytes();
-    let letter = match b {
-        [l] | [l, b':'] if l.is_ascii_alphabetic() => l.to_ascii_uppercase() as char,
-        _ => return None,
-    };
-    Some(format!(r"\\.\{letter}:"))
+    match t.as_bytes() {
+        [l] | [l, b':'] if l.is_ascii_alphabetic() => {
+            Some(format!("{}:", l.to_ascii_uppercase() as char))
+        }
+        _ => None,
+    }
 }
 
-/// Mount and serve until Ctrl+C, Ctrl+Break or console close.
-pub fn mount_console(vol: Volume, mountpoint: &str, sddl: Option<&str>) -> anyhow::Result<()> {
-    let init = load_winfsp()?;
-    let sd = match sddl {
-        Some(s) => SecurityDescriptor::from_sddl(s)?,
-        None => SecurityDescriptor::read_only_for(&current_user_sid()?)?,
+/// Mount on a drive letter or directory. With `global`, a drive letter goes
+/// through the Mount Manager (`\\.\U:`): a global drive that the same user's
+/// non-elevated Explorer sees too. That needs admin rights.
+fn mount_on(
+    host: &mut FileSystemHost<UfsFs>,
+    mountpoint: &str,
+    global: bool,
+) -> anyhow::Result<String> {
+    let (target, shown) = match drive_letter(mountpoint) {
+        Some(letter) if global => (format!(r"\\.\{letter}"), letter),
+        Some(letter) => (letter.clone(), letter),
+        None => (mountpoint.to_string(), mountpoint.to_string()),
     };
-    let vol = Arc::new(vol);
-    let mountpoint = mountpoint.to_string();
+    host.mount(target.as_str())
+        .map_err(|e| anyhow::anyhow!("cannot mount on {shown}: {e}"))?;
+    Ok(shown)
+}
+
+/// Serve the file system until Ctrl+C, Ctrl+Break, console close or the
+/// disk going away. `prefix` is the launcher's UNC volume prefix.
+pub fn serve(
+    vol: Arc<Volume>,
+    sd: SecurityDescriptor,
+    prefix: Option<String>,
+    mountpoint: Option<String>,
+    global: bool,
+) -> anyhow::Result<()> {
+    let init = load_winfsp()?;
+    // WinFsp reports a failed start only through its own exit code, which
+    // winfsp-rs does not expose; keep the reason here.
+    let failure: Arc<Mutex<Option<String>>> = Arc::default();
+    let fail = failure.clone();
+    let dev = vol.device().clone();
     let mut service = FileSystemServiceBuilder::new()
         .with_start(move || {
-            let mut host = build_host(vol.clone(), sd.clone(), None)?;
-            let mounted = match global_drive(&mountpoint) {
-                Some(global) => match host.mount(global.as_str()) {
-                    Ok(()) => Ok(global),
-                    Err(e) => {
-                        log::info!("global mount on {global} failed ({e:?}), mounting for this session only");
-                        host.mount(mountpoint.as_str()).map(|()| mountpoint.clone())
-                    }
-                },
-                None => host.mount(mountpoint.as_str()).map(|()| mountpoint.clone()),
+            let start = || -> anyhow::Result<FileSystemHost<UfsFs>> {
+                let mut host = build_host(vol.clone(), sd.clone(), prefix.as_deref())
+                    .map_err(|e| anyhow::anyhow!("cannot create the file system: {e:?}"))?;
+                let shown = match &mountpoint {
+                    Some(m) => Some(mount_on(&mut host, m, global)?),
+                    None => None,
+                };
+                host.start_with_threads(4)
+                    .map_err(|e| anyhow::anyhow!("cannot start the file system: {e:?}"))?;
+                match shown {
+                    Some(m) => eprintln!("Mounted read-only on {m}. Press Ctrl+C to unmount."),
+                    None => eprintln!("Serving {} read-only.", prefix.as_deref().unwrap_or("")),
+                }
+                Ok(host)
             };
-            if let Err(e) = mounted {
-                log::error!("cannot mount on {mountpoint}: {e}");
-                return Err(e.into());
-            }
-            host.start_with_threads(4)?;
-            eprintln!("Mounted read-only on {mountpoint}. Press Ctrl+C to unmount.");
-            Ok(host)
+            start().map_err(|e| {
+                log::error!("{e:#}");
+                *fail.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!("{e:#}"));
+                status(STATUS_UNSUCCESSFUL)
+            })
         })
         .with_stop(|host| {
             if let Some(host) = host {
@@ -625,10 +648,41 @@ pub fn mount_console(vol: Volume, mountpoint: &str, sddl: Option<&str>) -> anyho
     service
         .start()
         .map_err(|e| anyhow::anyhow!("cannot start: {e:?}"))?;
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if dev.is_gone() {
+                log::error!("{}: the disk is gone, unmounting", dev.name());
+                std::process::exit(3);
+            }
+        }
+    });
     service
         .join()
         .map_err(|e| anyhow::anyhow!("the file system stopped with an error: {e:?}"))?;
+    if let Some(e) = failure
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+    {
+        anyhow::bail!(e);
+    }
     Ok(())
+}
+
+/// Mount from the command line.
+pub fn mount_console(vol: Volume, mountpoint: &str, sddl: Option<&str>) -> anyhow::Result<()> {
+    let sd = match sddl {
+        Some(s) => SecurityDescriptor::for_files(s)?,
+        None => SecurityDescriptor::read_only_for(&current_user_sid()?)?,
+    };
+    serve(
+        Arc::new(vol),
+        sd,
+        None,
+        Some(mountpoint.to_string()),
+        is_elevated(),
+    )
 }
 
 #[cfg(test)]
@@ -650,15 +704,15 @@ mod tests {
 
     #[test]
     fn mount_point_forms() {
-        assert_eq!(global_drive("u:").as_deref(), Some(r"\\.\U:"));
-        assert_eq!(global_drive("U").as_deref(), Some(r"\\.\U:"));
-        assert_eq!(global_drive(r"U:\").as_deref(), Some(r"\\.\U:"));
-        assert_eq!(global_drive(r"C:\mnt\ufs"), None);
+        assert_eq!(drive_letter("u:").as_deref(), Some("U:"));
+        assert_eq!(drive_letter("U").as_deref(), Some("U:"));
+        assert_eq!(drive_letter(r"U:\").as_deref(), Some("U:"));
+        assert_eq!(drive_letter(r"C:\mnt\ufs"), None);
     }
 
     #[test]
     fn write_access_mask() {
-        assert_eq!(WRITE_ACCESS, 0x500d_0156);
+        assert_eq!(WRITE_ACCESS, crate::security::WRITE_RIGHTS);
         // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
         assert_eq!(0x0012_00a9 & WRITE_ACCESS, 0);
     }

@@ -163,7 +163,8 @@ fn explicit_part_and_errors() {
     assert_eq!(id, "s1a");
 
     let dev = std::sync::Arc::new(
-        ufsmount::device::Device::open(&ufsmount::device::Source::Image(path), None).unwrap(),
+        ufsmount::device::Device::open(&ufsmount::device::Source::Image(path.to_path_buf()), None)
+            .unwrap(),
     );
     let cands = ufsmount::partition::probe(&dev);
     assert!(ufsmount::partition::select(&cands, Some("s1")).is_err());

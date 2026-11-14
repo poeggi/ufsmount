@@ -5,25 +5,27 @@
 //! SYSTEM. Its arguments come from whoever may talk to the launcher, so they
 //! are checked strictly.
 
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use windows::Win32::Security::{
-    DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
+    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    SetFileSecurityW,
 };
+use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 use windows::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, KEY_WOW64_32KEY, REG_DWORD, REG_OPTION_NON_VOLATILE,
     REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyExW, RegSetValueExW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
-use winfsp::service::FileSystemServiceBuilder;
 
 use crate::device::{Device, Source, strip_prefix_ci};
 use crate::names::Charset;
 use crate::partition;
-use crate::security::{SecurityDescriptor, account_sid};
+use crate::security::{SecurityDescriptor, account_sid, check_admin_only, is_elevated};
 use crate::volume::Volume;
-use crate::winfs::{build_host, load_winfsp};
+use crate::winfs::serve;
 
 const SERVICE_KEY: PCWSTR = w!(r"SOFTWARE\WinFsp\Services\ufs");
 
@@ -80,70 +82,60 @@ pub fn run_service(
     mountpoint: Option<String>,
     user: Option<String>,
 ) -> anyhow::Result<()> {
-    let prefix = prefix.ok_or_else(|| anyhow::anyhow!("launcher mode needs -u"))?;
-    let inst = parse_prefix(&prefix)?;
-    let mountpoint = parse_mountpoint(mountpoint.as_deref().unwrap_or(""))?;
-    let user = user.ok_or_else(|| anyhow::anyhow!("launcher mode needs -U"))?;
-    let sid = account_sid(&user)?;
-    let sd = SecurityDescriptor::read_only_for(&sid)?;
-    log::info!("{} for {user} ({sid}) on {mountpoint:?}", inst.prefix);
+    let result = (|| {
+        let prefix = prefix.ok_or_else(|| anyhow::anyhow!("launcher mode needs -u"))?;
+        let inst = parse_prefix(&prefix)?;
+        let mountpoint = parse_mountpoint(mountpoint.as_deref().unwrap_or(""))?;
+        let user = user.ok_or_else(|| anyhow::anyhow!("launcher mode needs -U"))?;
+        let sid = account_sid(&user)?;
+        let sd = SecurityDescriptor::read_only_for(&sid)?;
+        log::info!("{} for {user} ({sid}) on {mountpoint:?}", inst.prefix);
 
-    // Open and probe before the service starts: a failure here is a plain error exit.
-    let dev = Arc::new(Device::open(&Source::PhysicalDrive(inst.drive), None)?);
-    let cands = partition::probe(&dev);
-    let cand = partition::select(&cands, inst.part.as_deref())?;
-    let vol = Arc::new(Volume::open(dev.clone(), cand, Charset::Utf8)?);
-
-    let init = load_winfsp()?;
-    let mut service = FileSystemServiceBuilder::new()
-        .with_start(move || {
-            let mut host = build_host(vol.clone(), sd.clone(), Some(&inst.prefix))?;
-            if let Some(m) = &mountpoint {
-                host.mount(m.as_str())?;
-            }
-            host.start_with_threads(4)?;
-            Ok(host)
-        })
-        .with_stop(|host| {
-            if let Some(host) = host {
-                host.stop();
-                host.unmount();
-            }
-            Ok(())
-        })
-        .build("ufsmount", init)
-        .map_err(|e| anyhow::anyhow!("cannot create the WinFsp service: {e:?}"))?;
-    service
-        .start()
-        .map_err(|e| anyhow::anyhow!("cannot start: {e:?}"))?;
-    service
-        .join()
-        .map_err(|e| anyhow::anyhow!("the file system stopped with an error: {e:?}"))?;
-    Ok(())
+        let dev = Arc::new(Device::open(&Source::PhysicalDrive(inst.drive), None)?);
+        let cands = partition::probe(&dev);
+        let cand = partition::select(&cands, inst.part.as_deref())?;
+        let vol = Arc::new(Volume::open(dev.clone(), cand, Charset::Utf8)?);
+        // The launcher runs as SYSTEM, so a drive letter is global without the Mount Manager.
+        serve(vol, sd, Some(inst.prefix), mountpoint, false)
+    })();
+    if let Err(e) = &result {
+        log::error!("{e:#}");
+    }
+    result
 }
 
 fn log_dir() -> anyhow::Result<PathBuf> {
     let base =
         std::env::var_os("ProgramData").ok_or_else(|| anyhow::anyhow!("ProgramData is not set"))?;
-    Ok(Path::new(&base).join(r"ufsmount\log"))
+    Ok(Path::new(&base).join("ufsmount"))
 }
 
-/// Create the log folder, readable and writable by SYSTEM and Administrators only.
-fn make_log_dir() -> anyhow::Result<PathBuf> {
-    let dir = log_dir()?;
-    std::fs::create_dir_all(&dir)?;
+/// Make `dir` a real folder owned by Administrators that only SYSTEM and
+/// Administrators can use. An existing folder is taken over, a junction refused:
+/// the launcher writes its logs there as SYSTEM.
+fn admin_only_dir(dir: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) => anyhow::ensure!(
+            meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
+            "{} is not a plain folder; remove it and run register again",
+            dir.display()
+        ),
+        Err(_) => std::fs::create_dir(dir)?,
+    }
     let sd = SecurityDescriptor::from_sddl("O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")?;
     // SAFETY: sd outlives the call.
     unsafe {
         SetFileSecurityW(
             &HSTRING::from(dir.as_os_str()),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
             sd.as_psd(),
         )
     }
     .ok()
     .map_err(|e| anyhow::anyhow!("cannot secure {}: {e}", dir.display()))?;
-    Ok(dir)
+    Ok(())
 }
 
 fn set_sz(key: HKEY, name: &str, value: &str) -> anyhow::Result<()> {
@@ -158,23 +150,22 @@ fn set_sz(key: HKEY, name: &str, value: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("cannot write {name}: {e}"))
 }
 
-/// The exe must sit where only administrators can change it: the launcher runs it as SYSTEM.
-fn installed_exe() -> anyhow::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    let pf = std::env::var("ProgramFiles")?;
-    let exe_s = exe.to_string_lossy().to_ascii_lowercase();
-    let pf_s = format!("{}\\", pf.trim_end_matches('\\').to_ascii_lowercase());
-    anyhow::ensure!(
-        exe_s.starts_with(&pf_s),
-        "{} is not under {pf}. Install ufsmount.exe there first: the launcher runs it as SYSTEM.",
-        exe.display()
-    );
-    Ok(exe)
-}
-
 pub fn register() -> anyhow::Result<()> {
-    let exe = installed_exe()?;
-    let logs = make_log_dir()?;
+    anyhow::ensure!(is_elevated(), "register needs an elevated prompt");
+    // The launcher runs the exe as SYSTEM: only administrators may be able to change it.
+    let exe = std::env::current_exe()?;
+    let folder = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("no folder for {}", exe.display()))?;
+    check_admin_only(folder)
+        .and_then(|()| check_admin_only(&exe))
+        .map_err(|e| anyhow::anyhow!("{e}. Install ufsmount.exe under Program Files first."))?;
+
+    let base = log_dir()?;
+    admin_only_dir(&base)?;
+    let logs = base.join("log");
+    admin_only_dir(&logs)?;
+
     let mut key = HKEY::default();
     // SAFETY: creating a registry key with valid out pointers.
     unsafe {
@@ -191,9 +182,7 @@ pub fn register() -> anyhow::Result<()> {
         )
     }
     .ok()
-    .map_err(|e| {
-        anyhow::anyhow!("cannot create the launcher registration (run as administrator): {e}")
-    })?;
+    .map_err(|e| anyhow::anyhow!("cannot create the launcher registration: {e}"))?;
     let result = (|| {
         set_sz(key, "Executable", &exe.to_string_lossy())?;
         set_sz(key, "CommandLine", "-u %1 -m %2 -U %U")?;

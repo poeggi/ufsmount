@@ -185,6 +185,8 @@ jobs:
           foreach ($d in $diff) { Write-Host "  $($d.SideIndicator) [$($d.InputObject)]" }
           if ($diff.Count -gt 0 -or $ka -ne $kb) { throw 'PATH changed' }
           'smoke test passed'
+          # The last native call (the schtasks query above) failed on purpose.
+          exit 0
 
       - name: Logs
         if: failure()

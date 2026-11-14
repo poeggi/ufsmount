@@ -20,8 +20,11 @@ impl<R: Backend> Ufs<R> {
 		buffer: &mut [u8],
 	) -> IoResult<usize> {
 		log::trace!("inode_read({inr}, {offset}, {})", buffer.len());
-		let mut blockbuf = vec![0u8; self.superblock.bsize as usize];
 		let ino = self.read_inode(inr)?;
+		if offset >= ino.size {
+			return Ok(0);
+		}
+		let mut blockbuf = vec![0u8; self.superblock.bsize as usize];
 
 		let mut boff = 0;
 		let len = (buffer.len() as u64).min(ino.size - offset);

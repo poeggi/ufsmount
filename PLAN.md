@@ -50,12 +50,7 @@ Files show up in Explorer and work with any program (copy, robocopy).
 
 1. Check the base. Done.
 2. Vendor and patch rufs (each patch a separate commit, fit for upstream).
-   - Build on Windows: gate the unix-only imports, pass names as bytes, add an ENOATTR value.
-   - Make `Write` optional on the backend.
-   - Return errors instead of panics on bad disk data (dir entries, file modes, cylinder groups).
-   - Clamp reads past end of file. Drop the long-symlink assert for large fragments.
-   - Expose `fs_clean` and `fs_flags`, so we can warn about a dirty file system.
-   - rufs takes `&mut self` everywhere: wrap it in a Mutex for now. Add caching later if it is slow.
+   The patch list is in `IMPLEMENTATION.md`, Step 2.
 3. Disk access.
    - Open `\\.\PhysicalDriveN` read-only (sector-aligned reads).
    - Parse MBR, GPT and BSD disklabel. List the UFS partitions found.
@@ -74,7 +69,7 @@ Files show up in Explorer and work with any program (copy, robocopy).
    - Compare file lists and checksums against the source tree.
 7. Launcher registration.
    - Register under the WinFsp launcher (like `fsreg.bat`).
-8. Installer.
+8. Installer. Manual install is enough for now.
    - Checks for WinFsp and its version. Points to the official MSI; no bundling while only betas are safe.
    - Copies `ufsmount.exe` and registers it with the launcher.
 

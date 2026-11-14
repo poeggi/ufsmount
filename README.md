@@ -16,25 +16,38 @@ Explorer, copy and robocopy work as on any drive.
 Manual for now:
 
 1. Install WinFsp.
-2. Copy `ufsmount.exe` to `C:\Program Files\ufsmount\`.
+2. Get `ufsmount.exe` from the [releases](../../releases), or build it (see Build).
+3. Copy it to `C:\Program Files\ufsmount\` and add that folder to your PATH.
 
-## Use
+## Start and stop
 
-From an elevated prompt:
+Find the disk number with `Get-Disk` (here: 1).
+
+Start, from an elevated prompt:
+
+```
+ufsmount mount PhysicalDrive1 U:
+```
+
+- U: is there while the command runs. Explorer and all programs see it.
+- Stop: press Ctrl+C in that window, or close it. U: goes away.
+- Unplugging the disk also stops it.
+
+## Other commands
+
+Also from an elevated prompt:
 
 ```
 ufsmount probe PhysicalDrive1
 ufsmount ls PhysicalDrive1 /home
 ufsmount cp PhysicalDrive1 /home/me D:\backup
-ufsmount mount PhysicalDrive1 U:
 ```
 
-- `probe` lists partitions and UFS file systems. `Get-Disk` shows the disk numbers.
-- `mount` runs until Ctrl+C. The drive also shows in your normal Explorer.
+- `probe` lists partitions and UFS file systems.
 - `--part s1a` picks a partition when there is more than one.
 - Image files work too: `ufsmount mount disk.img U:`.
 
-With the WinFsp launcher (`net use`):
+With the WinFsp launcher (`net use`), no window stays open:
 
 ```
 ufsmount register
@@ -42,7 +55,11 @@ net use U: \\ufs\PhysicalDrive1 /persistent:no
 net use U: /delete
 ```
 
-`register` and `net use` need an elevated prompt.
+- `register` once; `net use` starts, `net use /delete` stops.
+- Both need an elevated prompt.
+- Windows keeps `net use` drives per logon.
+  A drive mapped in an elevated prompt is not seen by your normal Explorer.
+  Use `mount` for Explorer.
 
 ## Limits
 

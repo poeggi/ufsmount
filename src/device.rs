@@ -323,6 +323,21 @@ impl Device {
         self.gone.load(Ordering::Relaxed)
     }
 
+    /// Ask the disk whether it still answers (an IOCTL that does not spin it up).
+    /// A disk that does not answer counts as gone from then on.
+    pub fn is_alive(&self) -> bool {
+        if self.is_gone() {
+            return false;
+        }
+        if self.raw.is_alive() {
+            return true;
+        }
+        if !self.gone.swap(true, Ordering::Relaxed) {
+            log::error!("{}: the disk is gone", self.name);
+        }
+        false
+    }
+
     /// The most recent device error, if any. Cleared by this call.
     pub fn take_last_error(&self) -> Option<DeviceError> {
         lock(&self.last_error).take()

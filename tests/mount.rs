@@ -8,6 +8,7 @@ use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -190,4 +191,31 @@ fn failed_mount_exits_with_an_error() {
         std::thread::sleep(Duration::from_millis(100));
     };
     assert!(!status.success(), "mount on {windows} must fail");
+}
+
+/// The in-process API the tray uses: stopping unmounts and releases the disk.
+#[test]
+fn mount_stop_releases_device() {
+    if !enabled() {
+        return;
+    }
+    ufsmount::winfs::load_winfsp().unwrap();
+    let path = write_temp("mount-api", &image_bytes(IMAGES[0]));
+    let (vol, _) = open(&path, None);
+    let dev = vol.device().clone();
+    let sid = ufsmount::security::current_user_sid().unwrap();
+    let sd = ufsmount::security::SecurityDescriptor::read_only_for(&sid).unwrap();
+    let letter = free_letter();
+    let target = format!("{letter}:");
+    let mut m =
+        ufsmount::winfs::Mount::start(Arc::new(vol), sd, None, Some(&target), false).unwrap();
+    assert_eq!(m.shown(), target);
+    assert_eq!(
+        fs::read(format!(r"{letter}:\file1")).unwrap(),
+        b"This is a simple file.\n"
+    );
+    m.stop();
+    m.stop();
+    assert!(!Path::new(&format!(r"{letter}:\")).exists());
+    assert_eq!(Arc::strong_count(&dev), 1);
 }

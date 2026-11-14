@@ -2,7 +2,7 @@
 //! The WinFsp file system: read-only, every write path reports write protection.
 
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use rufs::{InodeNum, InodeType};
 use windows::Win32::Foundation::{
@@ -505,8 +505,16 @@ fn file_version(path: &HSTRING) -> anyhow::Result<(u32, u32, u32, u32)> {
     }
 }
 
-/// Load winfsp-x64.dll by full path from the WinFsp install directory and check its version.
+/// Load winfsp-x64.dll by full path from the WinFsp install directory and check its
+/// version. Only the first call loads; later calls return its result.
 pub fn load_winfsp() -> anyhow::Result<FspInit> {
+    static INIT: OnceLock<Result<FspInit, String>> = OnceLock::new();
+    INIT.get_or_init(|| load_winfsp_once().map_err(|e| format!("{e:#}")))
+        .clone()
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+fn load_winfsp_once() -> anyhow::Result<FspInit> {
     let dir = winfsp_install_dir()?;
     let dll = HSTRING::from(format!(
         r"{}\bin\winfsp-x64.dll",
@@ -598,6 +606,60 @@ fn mount_on(
     Ok(shown)
 }
 
+/// A mounted, running file system. WinFsp allows one service per process, so
+/// a process with several file systems uses these directly.
+pub struct Mount {
+    host: Option<FileSystemHost<UfsFs>>,
+    shown: String,
+}
+
+impl Mount {
+    /// Create the file system, mount it (if `mountpoint` is given) and start
+    /// serving. `load_winfsp()` must have succeeded before.
+    pub fn start(
+        vol: Arc<Volume>,
+        sd: SecurityDescriptor,
+        prefix: Option<&str>,
+        mountpoint: Option<&str>,
+        global: bool,
+    ) -> anyhow::Result<Mount> {
+        let mut host = build_host(vol, sd, prefix)
+            .map_err(|e| anyhow::anyhow!("cannot create the file system: {e:?}"))?;
+        let shown = match mountpoint {
+            Some(m) => mount_on(&mut host, m, global)?,
+            None => prefix.unwrap_or_default().to_string(),
+        };
+        if let Err(e) = host.start_with_threads(4) {
+            host.unmount();
+            anyhow::bail!("cannot start the file system: {e:?}");
+        }
+        Ok(Mount {
+            host: Some(host),
+            shown,
+        })
+    }
+
+    /// The drive letter, folder or prefix it is served on.
+    pub fn shown(&self) -> &str {
+        &self.shown
+    }
+
+    /// Stop serving and unmount. Drops the file system, which closes the disk.
+    /// Calling it again does nothing.
+    pub fn stop(&mut self) {
+        if let Some(mut host) = self.host.take() {
+            host.stop();
+            host.unmount();
+        }
+    }
+}
+
+impl Drop for Mount {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// Serve the file system until Ctrl+C, Ctrl+Break, console close or the
 /// disk going away. `prefix` is the launcher's UNC volume prefix.
 pub fn serve(
@@ -615,31 +677,34 @@ pub fn serve(
     let dev = vol.device().clone();
     let mut service = FileSystemServiceBuilder::new()
         .with_start(move || {
-            let start = || -> anyhow::Result<FileSystemHost<UfsFs>> {
-                let mut host = build_host(vol.clone(), sd.clone(), prefix.as_deref())
-                    .map_err(|e| anyhow::anyhow!("cannot create the file system: {e:?}"))?;
-                let shown = match &mountpoint {
-                    Some(m) => Some(mount_on(&mut host, m, global)?),
-                    None => None,
-                };
-                host.start_with_threads(4)
-                    .map_err(|e| anyhow::anyhow!("cannot start the file system: {e:?}"))?;
-                match shown {
-                    Some(m) => eprintln!("Mounted read-only on {m}. Press Ctrl+C to unmount."),
-                    None => eprintln!("Serving {} read-only.", prefix.as_deref().unwrap_or("")),
+            let mount = Mount::start(
+                vol.clone(),
+                sd.clone(),
+                prefix.as_deref(),
+                mountpoint.as_deref(),
+                global,
+            );
+            match mount {
+                Ok(m) => {
+                    match &mountpoint {
+                        Some(_) => eprintln!(
+                            "Mounted read-only on {}. Press Ctrl+C to unmount.",
+                            m.shown()
+                        ),
+                        None => eprintln!("Serving {} read-only.", m.shown()),
+                    }
+                    Ok(m)
                 }
-                Ok(host)
-            };
-            start().map_err(|e| {
-                log::error!("{e:#}");
-                *fail.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!("{e:#}"));
-                status(STATUS_UNSUCCESSFUL)
-            })
+                Err(e) => {
+                    log::error!("{e:#}");
+                    *fail.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!("{e:#}"));
+                    Err(status(STATUS_UNSUCCESSFUL))
+                }
+            }
         })
-        .with_stop(|host| {
-            if let Some(host) = host {
-                host.stop();
-                host.unmount();
+        .with_stop(|mount| {
+            if let Some(m) = mount {
+                m.stop();
             }
             Ok(())
         })
@@ -650,8 +715,8 @@ pub fn serve(
         .map_err(|e| anyhow::anyhow!("cannot start: {e:?}"))?;
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            if dev.is_gone() {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if !dev.is_alive() {
                 log::error!("{}: the disk is gone, unmounting", dev.name());
                 std::process::exit(3);
             }

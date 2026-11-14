@@ -2,7 +2,8 @@
 //! Security descriptors, SIDs and ACL checks.
 
 use std::ffi::c_void;
-use std::path::Path;
+use std::os::windows::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
@@ -17,7 +18,11 @@ use windows::Win32::Security::{
     PSECURITY_DESCRIPTOR, PSID, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
     TokenElevation, TokenUser,
 };
+use windows::Win32::Security::{PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW};
+use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::Win32::UI::Shell::{FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 use windows::core::{BOOL, HSTRING, PWSTR};
 
 /// WinFsp asks with a 1024-byte buffer first and loops on larger descriptors.
@@ -339,6 +344,70 @@ pub fn account_sid(name: &str) -> anyhow::Result<String> {
         )
         .map_err(|e| anyhow::anyhow!("unknown account \"{name}\": {e}"))?;
         sid_to_string(PSID(sid.as_mut_ptr().cast()))
+    }
+}
+
+/// Folder SDDL: only SYSTEM and Administrators.
+pub const ADMIN_ONLY_DIR: &str = "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+
+/// Folder SDDL: SYSTEM and Administrators full, Users read.
+pub const ADMIN_DIR_USERS_READ: &str =
+    "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)";
+
+/// The ProgramData folder, from the known-folder API. Environment variables
+/// are not used: any process of the user can set them for an elevated child.
+pub fn program_data() -> anyhow::Result<PathBuf> {
+    // SAFETY: the returned string is freed with CoTaskMemFree after copying.
+    unsafe {
+        let p = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None)
+            .map_err(|e| anyhow::anyhow!("cannot find ProgramData: {e}"))?;
+        let s = p.to_string();
+        CoTaskMemFree(Some(p.0.cast()));
+        Ok(PathBuf::from(s?))
+    }
+}
+
+/// Make `dir` a real folder owned by Administrators with the protected DACL of
+/// `sddl`. An existing folder is taken over; a junction or symlink is refused,
+/// because elevated code writes there.
+pub fn secure_dir(dir: &Path, sddl: &str) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) => anyhow::ensure!(
+            meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
+            "{} is not a plain folder; remove it and try again",
+            dir.display()
+        ),
+        Err(_) => std::fs::create_dir(dir)?,
+    }
+    let sd = SecurityDescriptor::from_sddl(sddl)?;
+    // SAFETY: sd outlives the call.
+    unsafe {
+        SetFileSecurityW(
+            &HSTRING::from(dir.as_os_str()),
+            OWNER_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
+            sd.as_psd(),
+        )
+    }
+    .ok()
+    .map_err(|e| anyhow::anyhow!("cannot secure {}: {e}", dir.display()))?;
+    Ok(())
+}
+
+/// Remove `dir` and everything below it. A junction or symlink at `dir` is refused.
+pub fn remove_dir(dir: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) => {
+            anyhow::ensure!(
+                meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
+                "{} is not a plain folder; not removed",
+                dir.display()
+            );
+            std::fs::remove_dir_all(dir)
+                .map_err(|e| anyhow::anyhow!("cannot remove {}: {e}", dir.display()))
+        }
+        Err(_) => Ok(()),
     }
 }
 

@@ -5,15 +5,9 @@
 //! SYSTEM. Its arguments come from whoever may talk to the launcher, so they
 //! are checked strictly.
 
-use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use windows::Win32::Security::{
-    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    SetFileSecurityW,
-};
-use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 use windows::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, KEY_WOW64_32KEY, REG_DWORD, REG_OPTION_NON_VOLATILE,
     REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyExW, RegSetValueExW,
@@ -23,7 +17,10 @@ use windows::core::{HSTRING, PCWSTR, w};
 use crate::device::{Device, Source, strip_prefix_ci};
 use crate::names::Charset;
 use crate::partition;
-use crate::security::{SecurityDescriptor, account_sid, check_admin_only, is_elevated};
+use crate::security::{
+    ADMIN_ONLY_DIR, SecurityDescriptor, account_sid, check_admin_only, is_elevated, program_data,
+    secure_dir,
+};
 use crate::volume::Volume;
 use crate::winfs::serve;
 
@@ -105,37 +102,13 @@ pub fn run_service(
 }
 
 fn log_dir() -> anyhow::Result<PathBuf> {
-    let base =
-        std::env::var_os("ProgramData").ok_or_else(|| anyhow::anyhow!("ProgramData is not set"))?;
-    Ok(Path::new(&base).join("ufsmount"))
+    Ok(program_data()?.join("ufsmount"))
 }
 
-/// Make `dir` a real folder owned by Administrators that only SYSTEM and
-/// Administrators can use. An existing folder is taken over, a junction refused:
-/// the launcher writes its logs there as SYSTEM.
+/// Only SYSTEM and Administrators may use the folder: the launcher writes its
+/// logs there as SYSTEM.
 fn admin_only_dir(dir: &Path) -> anyhow::Result<()> {
-    match std::fs::symlink_metadata(dir) {
-        Ok(meta) => anyhow::ensure!(
-            meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
-            "{} is not a plain folder; remove it and run register again",
-            dir.display()
-        ),
-        Err(_) => std::fs::create_dir(dir)?,
-    }
-    let sd = SecurityDescriptor::from_sddl("O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")?;
-    // SAFETY: sd outlives the call.
-    unsafe {
-        SetFileSecurityW(
-            &HSTRING::from(dir.as_os_str()),
-            OWNER_SECURITY_INFORMATION
-                | DACL_SECURITY_INFORMATION
-                | PROTECTED_DACL_SECURITY_INFORMATION,
-            sd.as_psd(),
-        )
-    }
-    .ok()
-    .map_err(|e| anyhow::anyhow!("cannot secure {}: {e}", dir.display()))?;
-    Ok(())
+    secure_dir(dir, ADMIN_ONLY_DIR)
 }
 
 fn set_sz(key: HKEY, name: &str, value: &str) -> anyhow::Result<()> {

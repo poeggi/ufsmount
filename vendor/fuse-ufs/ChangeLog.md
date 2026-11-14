@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - rufs: reject superblocks with impossible sizes or offsets; open file systems whose `sbsize` is not `fsize` (512 and 1024-byte fragments)
 - rufs: inode numbers past the last cylinder group and unknown file types give `EIO`
 - rufs: reading a device node, fifo or socket returns no data instead of panicking; block indexes past the file give `EIO`
+- rufs: block pointers past the end of the file system give `EIO` on the read path
 
 ## [0.6.0] - 2025-09-27
 

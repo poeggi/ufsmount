@@ -347,15 +347,15 @@ impl<R: Backend> Ufs<R> {
 
 		let mut data = vec![0u64; pbp as usize];
 		let bno = match self.decode_blkidx(blkno)? {
-			InodeBlock::Direct(off) => NonZeroU64::new(direct[off] as u64),
+			InodeBlock::Direct(off) => direct[off] as u64,
 			InodeBlock::Indirect1(off) => {
 				let x1 = indirect[0] as u64;
 				if x1 == 0 {
 					return Ok(None);
 				}
 
-				self.read_pblock(x1, &mut data)?;
-				NonZeroU64::new(data[off])
+				self.read_pblock(self.check_blkno(inr, x1)?, &mut data)?;
+				data[off]
 			}
 			InodeBlock::Indirect2(high, low) => {
 				let x1 = indirect[1] as u64;
@@ -363,14 +363,14 @@ impl<R: Backend> Ufs<R> {
 					return Ok(None);
 				}
 
-				self.read_pblock(x1, &mut data)?;
+				self.read_pblock(self.check_blkno(inr, x1)?, &mut data)?;
 				let x2 = data[high];
 				if x2 == 0 {
 					return Ok(None);
 				}
 
-				self.read_pblock(x2, &mut data)?;
-				NonZeroU64::new(data[low])
+				self.read_pblock(self.check_blkno(inr, x2)?, &mut data)?;
+				data[low]
 			}
 			InodeBlock::Indirect3(high, mid, low) => {
 				let x1 = indirect[2] as u64;
@@ -378,26 +378,43 @@ impl<R: Backend> Ufs<R> {
 					return Ok(None);
 				}
 
-				self.read_pblock(x1, &mut data)?;
+				self.read_pblock(self.check_blkno(inr, x1)?, &mut data)?;
 				let x2 = data[high];
 				if x2 == 0 {
 					return Ok(None);
 				}
 
-				self.read_pblock(x2, &mut data)?;
+				self.read_pblock(self.check_blkno(inr, x2)?, &mut data)?;
 				let x3 = data[mid];
 				if x3 == 0 {
 					return Ok(None);
 				}
 
-				self.read_pblock(x3, &mut data)?;
-				NonZeroU64::new(data[low])
+				self.read_pblock(self.check_blkno(inr, x3)?, &mut data)?;
+				data[low]
 			}
 		};
 
-		log::trace!("inode_resolve_block({inr}, {blkno}): bno={bno:?}");
+		log::trace!("inode_resolve_block({inr}, {blkno}): bno={bno}");
 
-		Ok(bno)
+		if bno == 0 {
+			return Ok(None);
+		}
+		Ok(NonZeroU64::new(self.check_blkno(inr, bno)?))
+	}
+
+	/// Check that a block number (in fragments) taken from the disk lies within
+	/// the file system. Only the start is checked, not the length of the run.
+	pub(super) fn check_blkno(&self, inr: InodeNum, bno: u64) -> IoResult<u64> {
+		if bno < self.superblock.size as u64 {
+			Ok(bno)
+		} else {
+			log::error!(
+				"inode {inr}: block {bno} is outside the file system ({} fragments)",
+				self.superblock.size
+			);
+			Err(err!(EIO))
+		}
 	}
 
 	pub(super) fn inode_get_block_size(&mut self, ino: &Inode, blkidx: u64) -> IoResult<usize> {

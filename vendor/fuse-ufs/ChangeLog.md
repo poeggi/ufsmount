@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - rufs: corrupt extattr areas give `EIO` instead of panicking
 - rufs: directory records leave room for the NUL after the name, as FreeBSD requires
 - rufs: directory entries behind an unused (deleted) first entry of a chunk are listed and found
+- rufs: corrupt directory records and directories with holes give `EIO` instead of panicking or looping; a read-only listing skips the rest of a corrupt chunk
 
 ## [0.6.0] - 2025-09-27
 

@@ -27,7 +27,17 @@ impl Header {
 		}
 	}
 
-	fn parse<T: BufRead + Seek>(file: &mut Decoder<T>) -> IoResult<Option<Header>> {
+	/// Parse the record at the current position of a chunk that ends at `end`.
+	/// Returns `None` at the end of the chunk and `EIO` for a corrupt record.
+	fn parse<T: BufRead + Seek>(file: &mut Decoder<T>, end: u64) -> IoResult<Option<Header>> {
+		let pos = file.pos()?;
+		if pos >= end {
+			return Ok(None);
+		}
+		if end - pos < 8 {
+			log::error!("Header::parse(): truncated record at {pos}");
+			return Err(err!(EIO));
+		}
 		let inr: InodeNum = file.decode()?;
 		let reclen: u16 = file.decode()?;
 		if reclen == 0 {
@@ -36,6 +46,20 @@ impl Header {
 		let dtype: u8 = file.decode()?;
 		let namelen: u8 = file.decode()?;
 		let mut name = [0u8; UFS_MAXNAMELEN + 1];
+
+		// As fsck's dircheck(): a record is 4-byte aligned and ends within its chunk,
+		// and a used record holds its name and the NUL.
+		if reclen < 8 ||
+			!reclen.is_multiple_of(4) ||
+			u64::from(reclen) > end - pos ||
+			(inr.get() != 0 && reclen < dirsiz(namelen))
+		{
+			log::error!(
+				"Header::parse(): corrupt record at {pos}: inr={inr}, reclen={reclen}, \
+				 namelen={namelen}"
+			);
+			return Err(err!(EIO));
+		}
 
 		// An unused entry (d_ino 0) only holds space; its name may be stale.
 		if inr.get() == 0 {
@@ -56,7 +80,7 @@ impl Header {
 		file.seek_relative(off as i64)?;
 
 		log::trace!(
-			"Header::read(): {{ inr={inr}, reclen={reclen}, namelen={namelen}, name=\"{}\", dtype={dtype} }}",
+			"Header::parse(): {{ inr={inr}, reclen={reclen}, namelen={namelen}, name=\"{}\", dtype={dtype} }}",
 			name[0..namelen.into()].escape_ascii()
 		);
 
@@ -131,15 +155,28 @@ fn dirsiz(namelen: u8) -> u16 {
 	(8 + namelen as u16 + 1 + 3) & !3
 }
 
+/// List the entries of one chunk. A corrupt record gives `EIO` if `strict`; otherwise
+/// the rest of the chunk is skipped, as FreeBSD does on a read-only mount.
 fn readdir_block<T>(
 	inr: InodeNum,
 	block: &[u8],
 	config: Config,
+	strict: bool,
 	mut f: impl FnMut(&[u8], InodeNum, InodeType) -> Option<T>,
 ) -> IoResult<Option<T>> {
+	let end = block.len() as u64;
 	let mut file = Decoder::new(Cursor::new(block), config);
 
-	while let Ok(Some(hdr)) = Header::parse(&mut file) {
+	loop {
+		let hdr = match Header::parse(&mut file, end) {
+			Ok(Some(hdr)) => hdr,
+			Ok(None) => break,
+			Err(e) if strict => return Err(e),
+			Err(_) => {
+				log::error!("readdir_block({inr}): skipping the rest of a corrupt chunk");
+				break;
+			}
+		};
 		if hdr.inr.get() == 0 {
 			continue;
 		}
@@ -168,11 +205,12 @@ fn readdir_block<T>(
 }
 
 fn newlink_block(block: &mut [u8], mut entry: Header, config: Config) -> IoResult<bool> {
+	let end = block.len() as u64;
 	let mut file = Decoder::new(Cursor::new(block), config);
 
 	loop {
 		let pos = file.pos()?;
-		let Ok(Some(mut hdr)) = Header::parse(&mut file) else {
+		let Some(mut hdr) = Header::parse(&mut file, end)? else {
 			break;
 		};
 		if hdr.inr.get() == 0 {
@@ -209,12 +247,13 @@ fn unlink_block(
 	name: &[u8],
 	config: Config,
 ) -> IoResult<Option<(InodeNum, bool)>> {
+	let end = block.len() as u64;
 	let mut file = Decoder::new(Cursor::new(block), config);
 	let mut prevpos = 0;
 
 	loop {
 		let pos = file.pos()?;
-		let Ok(Some(hdr)) = Header::parse(&mut file) else {
+		let Some(hdr) = Header::parse(&mut file, end)? else {
 			break;
 		};
 
@@ -228,8 +267,8 @@ fn unlink_block(
 
 		let has;
 		if pos == 0 {
-			match Header::parse(&mut file) {
-				Ok(Some(next)) => {
+			match Header::parse(&mut file, end)? {
+				Some(next) => {
 					log::trace!("unlink_block({dinr}, \"{shown}\"): next={next:?}");
 					let new = Header {
 						reclen: hdr.reclen + next.reclen,
@@ -246,7 +285,7 @@ fn unlink_block(
 			}
 		} else {
 			file.seek(prevpos)?;
-			match Header::parse(&mut file)? {
+			match Header::parse(&mut file, end)? {
 				Some(mut prev) => {
 					prev.reclen += hdr.reclen;
 					file.seek(prevpos)?;
@@ -325,18 +364,39 @@ impl<R: Backend> Ufs<R> {
 	) -> IoResult<Option<T>> {
 		let ino = self.read_inode(inr)?;
 		ino.assert_dir()?;
+		let strict = self.write_enabled();
 		let mut block = [0u8; DIRBLKSIZE];
 		let mut pos = 0;
 		while pos < ino.size {
-			let n = self.inode_read(inr, pos, &mut block)?;
-			assert_eq!(n, DIRBLKSIZE);
-			if let Some(x) = readdir_block(inr, &block, self.file.config(), &mut f)? {
+			let n = self.dir_read_chunk(inr, &ino, pos, &mut block)?;
+			if let Some(x) = readdir_block(inr, &block[..n], self.file.config(), strict, &mut f)? {
 				return Ok(Some(x));
 			}
 
 			pos += DIRBLKSIZE as u64;
 		}
 		Ok(None)
+	}
+
+	/// Read the directory chunk at `pos`. Returns its length: DIRBLKSIZE, or less for a
+	/// partial chunk at the end. A hole gives `EIO`; directories have none.
+	fn dir_read_chunk(
+		&mut self,
+		inr: InodeNum,
+		ino: &Inode,
+		pos: u64,
+		block: &mut [u8],
+	) -> IoResult<usize> {
+		let bs = self.superblock.bsize as u64;
+		if pos.is_multiple_of(bs) && self.inode_resolve_block(inr, ino, pos / bs)?.is_none() {
+			log::error!("directory {inr}: hole at offset {pos}");
+			return Err(err!(EIO));
+		}
+		let n = self.inode_read(inr, pos, &mut block[..DIRBLKSIZE])?;
+		if n != DIRBLKSIZE {
+			log::warn!("directory {inr}: partial chunk of {n} bytes at offset {pos}");
+		}
+		Ok(n)
 	}
 
 	pub(super) fn dir_unlink(&mut self, dinr: InodeNum, name: &OsStr) -> IoResult<InodeNum> {
@@ -348,8 +408,9 @@ impl<R: Backend> Ufs<R> {
 		let mut block = vec![0u8; DIRBLKSIZE];
 		let mut pos = 0;
 		while pos < dino.size {
-			let n = self.inode_read(dinr, pos, &mut block)?;
-			assert_eq!(n, DIRBLKSIZE);
+			if self.dir_read_chunk(dinr, &dino, pos, &mut block)? != DIRBLKSIZE {
+				return Err(err!(EIO));
+			}
 
 			if let Some((inr, has)) = unlink_block(
 				dinr,
@@ -391,8 +452,9 @@ impl<R: Backend> Ufs<R> {
 		let mut block = [0u8; DIRBLKSIZE];
 		let mut pos = 0;
 		while pos < dino.size {
-			let n = self.inode_read(dinr, pos, &mut block)?;
-			assert_eq!(n, DIRBLKSIZE);
+			if self.dir_read_chunk(dinr, &dino, pos, &mut block)? != DIRBLKSIZE {
+				return Err(err!(EIO));
+			}
 
 			if newlink_block(&mut block, entry, self.file.config())? {
 				self.inode_write(dinr, pos, &block)?;
@@ -596,7 +658,7 @@ mod t {
 
 	fn list(block: &[u8], big: bool) -> Vec<(Vec<u8>, u32)> {
 		let mut names = Vec::new();
-		readdir_block(inr(2), block, config(big), |name, inr, _kind| {
+		readdir_block(inr(2), block, config(big), false, |name, inr, _kind| {
 			names.push((name.to_vec(), inr.get()));
 			None::<()>
 		})
@@ -691,5 +753,44 @@ mod t {
 				vec![(b"new".to_vec(), 7), (b"live".to_vec(), 5)]
 			);
 		}
+	}
+
+	/// A corrupt record ends a read-only listing of its chunk. Strict reading and the
+	/// write paths give EIO instead of panicking.
+	#[test]
+	fn corrupt_record() {
+		let mut block = Vec::new();
+		push_entry(&mut block, false, 5, 16, DT_REG, b"ok");
+		push_entry(&mut block, false, 6, 13, DT_REG, b"bad");
+		block.resize(DIRBLKSIZE, 0);
+		assert_eq!(list(&block, false), vec![(b"ok".to_vec(), 5)]);
+
+		let strict = readdir_block(inr(2), &block, Config::little(), true, |_, _, _| None::<()>);
+		assert!(strict.is_err());
+		let entry = Header::new(inr(7), InodeType::RegularFile, b"new");
+		assert!(newlink_block(&mut block, entry, Config::little()).is_err());
+		assert!(unlink_block(inr(2), &mut block, b"none", Config::little()).is_err());
+	}
+
+	/// A record that runs past the end of its chunk is corrupt.
+	#[test]
+	fn record_past_chunk() {
+		let mut block = Vec::new();
+		push_entry(&mut block, false, 5, 16, DT_REG, b"ok");
+		push_entry(&mut block, false, 6, DIRBLKSIZE as u16, DT_REG, b"long");
+		block.truncate(DIRBLKSIZE);
+		assert_eq!(list(&block, false), vec![(b"ok".to_vec(), 5)]);
+	}
+
+	/// The last chunk of a directory may be partial.
+	#[test]
+	fn partial_chunk() {
+		let mut block = Vec::new();
+		push_entry(&mut block, false, 5, 16, DT_REG, b"a");
+		push_entry(&mut block, false, 6, 84, DT_REG, b"b");
+		assert_eq!(
+			list(&block, false),
+			vec![(b"a".to_vec(), 5), (b"b".to_vec(), 6)]
+		);
 	}
 }

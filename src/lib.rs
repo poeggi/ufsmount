@@ -7,5 +7,6 @@ pub mod launcher;
 pub mod names;
 pub mod partition;
 pub mod security;
+pub mod tray;
 pub mod volume;
 pub mod winfs;

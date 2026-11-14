@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! The scheduled task that starts the tray elevated without a UAC prompt, and
+//! the tray's folders under ProgramData.
+
+use std::path::{Path, PathBuf};
+
+use super::sys::{run_hidden, session_user, system_dir};
+use crate::security::{
+    ADMIN_DIR_USERS_READ, ADMIN_ONLY_DIR, account_sid, check_admin_only, current_user_sid,
+    is_elevated, program_data, remove_dir, secure_dir,
+};
+
+pub const TASK_NAME: &str = "ufsmount-tray";
+
+/// The argument the task passes. A tray started with it takes no other input.
+pub const FROM_TASK: &str = "--from-task";
+
+/// `<ProgramData>\ufsmount`: only SYSTEM and Administrators.
+pub fn base_dir() -> anyhow::Result<PathBuf> {
+    Ok(program_data()?.join("ufsmount"))
+}
+
+/// Create and secure `<ProgramData>\ufsmount` (admin-only) and its `tray`
+/// folder (Users may read the log). Returns the `tray` folder.
+pub fn data_dirs() -> anyhow::Result<PathBuf> {
+    let base = base_dir()?;
+    secure_dir(&base, ADMIN_ONLY_DIR)?;
+    let tray = base.join("tray");
+    secure_dir(&tray, ADMIN_DIR_USERS_READ)?;
+    Ok(tray)
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// The task definition. `sid` is the user it runs for; `exe` a literal path.
+pub fn task_xml(exe: &Path, sid: &str, logon: bool) -> String {
+    let sid = xml_escape(sid);
+    let exe = xml_escape(&exe.to_string_lossy());
+    let triggers = if logon {
+        format!(
+            "    <LogonTrigger>\n      <Enabled>true</Enabled>\n      <UserId>{sid}</UserId>\n    </LogonTrigger>\n"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Starts the ufsmount tray with administrator rights, without a UAC prompt.</Description>
+    <SecurityDescriptor>D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;{sid})</SecurityDescriptor>
+  </RegistrationInfo>
+  <Triggers>
+{triggers}  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{sid}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>4</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe}</Command>
+      <Arguments>{FROM_TASK}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#
+    )
+}
+
+fn schtasks(args: &str) -> anyhow::Result<u32> {
+    run_hidden(&system_dir().join("schtasks.exe"), args)
+}
+
+/// The SID of the user at the desk, or of the process user if there is none.
+pub fn session_user_sid() -> anyhow::Result<String> {
+    match session_user().map(|n| account_sid(&n)) {
+        Some(Ok(sid)) => Ok(sid),
+        Some(Err(e)) => {
+            log::warn!("session user: {e:#}; using the process user");
+            current_user_sid()
+        }
+        None => current_user_sid(),
+    }
+}
+
+/// Our exe and its folder must be writable by administrators only: the task
+/// runs it elevated without asking.
+pub fn check_install_dir() -> anyhow::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("no folder for {}", exe.display()))?;
+    check_admin_only(dir)?;
+    check_admin_only(&exe)?;
+    Ok(exe)
+}
+
+/// Create (or replace) the task for the session user, and the data folders.
+pub fn install(logon: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(is_elevated(), "needs administrator rights");
+    let exe = check_install_dir()?;
+    data_dirs()?;
+    let sid = session_user_sid()?;
+    let xml = task_xml(&exe, &sid, logon);
+    let file = base_dir()?.join("task.xml");
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend(xml.encode_utf16().flat_map(|u| u.to_le_bytes()));
+    std::fs::write(&file, bytes)?;
+    let code = schtasks(&format!(
+        "/Create /TN {TASK_NAME} /XML \"{}\" /F",
+        file.display()
+    ));
+    let _ = std::fs::remove_file(&file);
+    let code = code?;
+    anyhow::ensure!(code == 0, "schtasks /Create failed with exit code {code}");
+    log::info!("task {TASK_NAME} created for {sid} (start at logon: {logon})");
+    Ok(())
+}
+
+/// Delete the task and `<ProgramData>\ufsmount`.
+pub fn remove() -> anyhow::Result<()> {
+    anyhow::ensure!(is_elevated(), "needs administrator rights");
+    let code = schtasks(&format!("/Delete /TN {TASK_NAME} /F"))?;
+    if code != 0 {
+        log::info!("schtasks /Delete: exit code {code} (no task?)");
+    }
+    remove_dir(&base_dir()?)
+}
+
+pub fn exists() -> bool {
+    schtasks(&format!("/Query /TN {TASK_NAME}")).is_ok_and(|c| c == 0)
+}
+
+pub fn run() -> anyhow::Result<()> {
+    let code = schtasks(&format!("/Run /TN {TASK_NAME}"))?;
+    anyhow::ensure!(code == 0, "schtasks /Run failed with exit code {code}");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_definition() {
+        let exe = Path::new(r"C:\Program Files\ufsmount\ufsmount-tray.exe");
+        let x = task_xml(exe, "S-1-5-21-1-2-3-1001", false);
+        assert!(x.contains(r"<Command>C:\Program Files\ufsmount\ufsmount-tray.exe</Command>"));
+        assert!(x.contains("<Arguments>--from-task</Arguments>"));
+        assert!(x.contains("<UserId>S-1-5-21-1-2-3-1001</UserId>"));
+        assert!(x.contains("<LogonType>InteractiveToken</LogonType>"));
+        assert!(x.contains("<RunLevel>HighestAvailable</RunLevel>"));
+        assert!(x.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+        assert!(x.contains("<Priority>4</Priority>"));
+        assert!(x.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
+        assert!(x.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+        assert!(!x.contains("LogonTrigger"));
+        assert!(!x.contains('%'));
+        assert!(task_xml(exe, "S-1-5-21-1-2-3-1001", true).contains("<LogonTrigger>"));
+        assert!(task_xml(Path::new("a&b"), "x", false).contains("a&amp;b"));
+    }
+}

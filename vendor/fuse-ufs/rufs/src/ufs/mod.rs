@@ -145,9 +145,13 @@ impl<R: Backend> Ufs<R> {
 		let cst = &sb.cstotal;
 		Info {
 			blocks:  sb.dsize as u64,
-			bfree:   (cst.nbfree * sb.frag as i64 + cst.nffree) as u64,
-			files:   (sb.ipg * sb.ncg) as u64,
-			ffree:   cst.nifree as u64,
+			bfree:   cst
+				.nbfree
+				.saturating_mul(sb.frag as i64)
+				.saturating_add(cst.nffree)
+				.max(0) as u64,
+			files:   sb.ipg as u64 * sb.ncg as u64,
+			ffree:   cst.nifree.max(0) as u64,
 			bsize:   sb.bsize as u32,
 			fsize:   sb.fsize as u32,
 			frags:   sb.size as u64,
@@ -185,14 +189,28 @@ impl<R: Backend> Ufs<R> {
 		sbassert!(sb.ipg > 0);
 		sbassert!(sb.fpg > 0);
 		sbassert!(sb.frag > 0 && sb.frag <= 8);
+		// MINBSIZE, MAXBSIZE and DEV_BSIZE: everything below relies on sane sizes.
+		sbassert!(sb.bsize >= 4096 && sb.bsize <= 65536);
+		sbassert!(sb.fsize >= 512);
 		sbassert!(sb.fsize == (sb.bsize / sb.frag));
+		sbassert!(sb.size > 0 && sb.dsize > 0 && sb.dsize <= sb.size);
+		// The last cylinder group may be partial, but not empty. Together with the
+		// byte size check, this keeps fragment and inode offsets from overflowing.
+		sbassert!(sb.size > (sb.ncg as i64 - 1) * sb.fpg as i64);
+		sbassert!(sb.size <= sb.ncg as i64 * sb.fpg as i64);
+		sbassert!(sb.size.checked_mul(sb.fsize as i64).is_some());
+		sbassert!(sb.sblkno >= 0 && sb.sblkno < sb.fpg);
+		sbassert!(sb.cblkno >= 0 && sb.cblkno < sb.fpg);
+		sbassert!(sb.iblkno >= 0 && sb.iblkno < sb.fpg);
 		// TODO: this looks ugly:
 		sbassert!(Some(sb.bsize) == 1i32.checked_shl(sb.bshift as u32));
 		sbassert!(Some(sb.fsize) == 1i32.checked_shl(sb.fshift as u32));
 		sbassert!(Some(sb.frag) == 1i32.checked_shl(sb.fragshift as u32));
-		sbassert!(sb.bsize == (!sb.bmask + 1));
-		sbassert!(sb.fsize == (!sb.fmask + 1));
-		sbassert!(sb.sbsize == sb.fsize);
+		sbassert!(sb.bmask == !(sb.bsize - 1));
+		sbassert!(sb.fmask == !(sb.fsize - 1));
+		// sizeof(struct fs) to SBLOCKSIZE, as FreeBSD checks. newfs rounds it up to
+		// a fragment, so it is 1536 for 512-byte fragments, not fsize.
+		sbassert!(sb.sbsize >= 1376 && sb.sbsize <= 8192);
 		sbassert!(sb.cgsize_struct() < sb.bsize as usize);
 
 		// Reading every cylinder group is slow on large disks, and one bad sector
@@ -205,7 +223,7 @@ impl<R: Backend> Ufs<R> {
 			// check that all superblocks are ok.
 			for i in 0..sb.ncg {
 				let addr = (i as u64 * fpg + sblkno) * fs;
-				let csb: Superblock = self.file.decode_at(addr).unwrap();
+				let csb: Superblock = self.file.decode_at(addr)?;
 				if csb.magic != FS_UFS2_MAGIC {
 					log::error!("CG{i} has invalid superblock magic: {:x}", csb.magic);
 					return Err(err!(EIO));
@@ -215,7 +233,7 @@ impl<R: Backend> Ufs<R> {
 			// check that all cylgroups are ok.
 			for i in 0..self.superblock.ncg {
 				let addr = self.cg_addr(i as u64);
-				let cg: CylGroup = self.file.decode_at(addr).unwrap();
+				let cg: CylGroup = self.file.decode_at(addr)?;
 				if cg.magic != CG_MAGIC {
 					log::error!("CG{i} has invalid cg magic: {:x}", cg.magic);
 					return Err(err!(EIO));

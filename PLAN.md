@@ -48,6 +48,8 @@ Files show up in Explorer and work with any program (copy, robocopy).
 
 ## Milestones
 
+Status: 1 to 7 done and tested on the real disk (probe, ls, cp, mount, net use). 8 is open.
+
 1. Check the base. Done.
 2. Vendor and patch rufs (each patch a separate commit, fit for upstream).
    The patch list is in `IMPLEMENTATION.md`, Step 2.

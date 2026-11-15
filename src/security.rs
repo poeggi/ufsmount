@@ -18,8 +18,8 @@ use windows::Win32::Security::{
     GetAclInformation, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorGroup,
     GetSecurityDescriptorLength, GetSecurityDescriptorOwner, GetTokenInformation,
     IsValidSecurityDescriptor, IsValidSid, LookupAccountNameW, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
-    TokenElevation, TokenUser,
+    PSECURITY_DESCRIPTOR, PSID, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_QUERY,
+    TOKEN_USER, TokenElevation, TokenElevationType, TokenUser,
 };
 use windows::Win32::Security::{
     PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, SetKernelObjectSecurity,
@@ -388,7 +388,7 @@ pub fn current_user_sid() -> anyhow::Result<String> {
 }
 
 /// Whether `token` (open for TOKEN_QUERY) is elevated.
-pub(crate) fn token_elevated(token: HANDLE) -> anyhow::Result<bool> {
+fn token_elevated(token: HANDLE) -> anyhow::Result<bool> {
     let mut elevation = TOKEN_ELEVATION::default();
     let mut needed = 0u32;
     // SAFETY: the buffer is a properly sized TOKEN_ELEVATION.
@@ -402,6 +402,25 @@ pub(crate) fn token_elevated(token: HANDLE) -> anyhow::Result<bool> {
         )?;
     }
     Ok(elevation.TokenIsElevated != 0)
+}
+
+/// The elevation type of `token` (open for TOKEN_QUERY). Full and Limited are
+/// the two halves of a UAC split logon; Default is a token that has no other
+/// half (no admin rights, UAC off, or the built-in Administrator).
+pub(crate) fn token_elevation_type(token: HANDLE) -> anyhow::Result<TOKEN_ELEVATION_TYPE> {
+    let mut kind = TOKEN_ELEVATION_TYPE::default();
+    let mut needed = 0u32;
+    // SAFETY: the buffer is a properly sized TOKEN_ELEVATION_TYPE.
+    unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevationType,
+            Some((&raw mut kind).cast()),
+            size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+            &mut needed,
+        )?;
+    }
+    Ok(kind)
 }
 
 /// Whether this process runs elevated.
@@ -640,6 +659,17 @@ mod tests {
         );
         // Deny ACEs only take rights away.
         assert!(SecurityDescriptor::for_files("O:BAG:BAD:(D;;FA;;;WD)(A;;FRFX;;;WD)").is_ok());
+    }
+
+    #[test]
+    fn elevation_type_matches_elevation() {
+        use windows::Win32::Security::{TokenElevationTypeFull, TokenElevationTypeLimited};
+        let token = process_token().unwrap();
+        let kind = token_elevation_type(token.0).unwrap();
+        let elevated = token_elevated(token.0).unwrap();
+        assert!((1..=3).contains(&kind.0), "{kind:?}");
+        assert!(kind != TokenElevationTypeFull || elevated);
+        assert!(kind != TokenElevationTypeLimited || !elevated);
     }
 
     #[test]

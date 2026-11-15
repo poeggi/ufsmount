@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Security::{
     DuplicateTokenEx, SecurityImpersonation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TokenPrimary,
+    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TokenElevationTypeFull, TokenPrimary,
 };
 use windows::Win32::System::RemoteDesktop::{
     WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_INFO_CLASS, WTSDomainName, WTSFreeMemory,
@@ -32,7 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
-use crate::security::{Handle, token_elevated};
+use crate::security::{Handle, token_elevation_type};
 
 /// An empty path if the call fails.
 fn dir_from(f: impl Fn(Option<&mut [u16]>) -> u32) -> PathBuf {
@@ -183,15 +183,21 @@ pub fn run_hidden(exe: &Path, args: &str) -> anyhow::Result<u32> {
     }
 }
 
+/// Refuse the full token of a UAC split logon: its user has a limited one.
+/// A token without a split (UAC off, the built-in Administrator) is the
+/// user's only token and is allowed, elevated or not.
 fn ensure_unelevated(token: HANDLE) -> anyhow::Result<()> {
-    anyhow::ensure!(!token_elevated(token)?, "the desktop shell runs elevated");
+    anyhow::ensure!(
+        token_elevation_type(token)? != TokenElevationTypeFull,
+        "the desktop shell runs elevated"
+    );
     Ok(())
 }
 
 /// Open `path` in Explorer as the non-elevated user: explorer.exe by full path,
-/// with the token of the desktop shell. Without the Secondary Logon service the
-/// shell is made the parent of the new process instead. An elevated shell is
-/// refused.
+/// in the system folder, with the token of the desktop shell. Without the
+/// Secondary Logon service the shell is made the parent of the new process
+/// instead. A shell elevated by UAC is refused.
 pub fn open_unelevated(path: &str) -> anyhow::Result<()> {
     // SAFETY: plain calls.
     let pid = unsafe {
@@ -204,12 +210,15 @@ pub fn open_unelevated(path: &str) -> anyhow::Result<()> {
     anyhow::ensure!(pid != 0, "no desktop shell process");
     let exe = windows_dir().join("explorer.exe");
     anyhow::ensure!(exe.is_absolute(), "no Windows folder");
+    let cwd = system_dir();
+    anyhow::ensure!(cwd.is_absolute(), "no system folder");
+    let cwd = HSTRING::from(cwd.as_os_str());
     let cmd = format!("{} {}", quote(&exe.to_string_lossy()), arg(path));
-    match start_with_shell_token(pid, &exe, &cmd) {
+    match start_with_shell_token(pid, &exe, &cmd, &cwd) {
         Ok(()) => Ok(()),
         Err(e) => {
             log::info!("shell token: {e:#}; trying the shell as parent");
-            start_as_child_of(pid, &exe, &cmd)
+            start_as_child_of(pid, &exe, &cmd, &cwd)
         }
     }
 }
@@ -218,7 +227,7 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-fn start_as_child_of(pid: u32, exe: &Path, cmd: &str) -> anyhow::Result<()> {
+fn start_as_child_of(pid: u32, exe: &Path, cmd: &str, cwd: &HSTRING) -> anyhow::Result<()> {
     let mut cmd = wide(cmd);
     // SAFETY: the attribute list lives in `buf` until it is deleted; every
     // handle is owned by a guard.
@@ -265,7 +274,7 @@ fn start_as_child_of(pid: u32, exe: &Path, cmd: &str) -> anyhow::Result<()> {
                 false,
                 EXTENDED_STARTUPINFO_PRESENT,
                 None,
-                PCWSTR::null(),
+                cwd,
                 &si.StartupInfo,
                 &mut pi,
             )?;
@@ -278,7 +287,7 @@ fn start_as_child_of(pid: u32, exe: &Path, cmd: &str) -> anyhow::Result<()> {
     }
 }
 
-fn start_with_shell_token(pid: u32, exe: &Path, cmd: &str) -> anyhow::Result<()> {
+fn start_with_shell_token(pid: u32, exe: &Path, cmd: &str, cwd: &HSTRING) -> anyhow::Result<()> {
     let mut cmd = wide(cmd);
     // SAFETY: plain Win32 calls; every handle is owned by a guard.
     unsafe {
@@ -313,7 +322,7 @@ fn start_with_shell_token(pid: u32, exe: &Path, cmd: &str) -> anyhow::Result<()>
             Some(PWSTR(cmd.as_mut_ptr())),
             PROCESS_CREATION_FLAGS(0),
             None,
-            PCWSTR::null(),
+            cwd,
             &si,
             &mut pi,
         )?;

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::sys::{run_hidden, session_user, system_dir};
 use crate::security::{
-    ADMIN_DIR_USERS_READ, ADMIN_ONLY_DIR, account_sid, check_admin_only, current_user_sid,
+    ADMIN_DIR_USERS_READ, ADMIN_ONLY_DIR, account_sid, check_install_path, current_user_sid,
     is_elevated, program_data, remove_dir, secure_dir,
 };
 
@@ -113,15 +113,11 @@ pub fn session_user_sid() -> anyhow::Result<String> {
     }
 }
 
-/// Our exe and its folder must be writable by administrators only: the task
-/// runs it elevated without asking.
+/// Our exe must lie under Program Files and be writable by administrators
+/// only, with every folder on the way: the task runs it elevated without asking.
 pub fn check_install_dir() -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe()?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("no folder for {}", exe.display()))?;
-    check_admin_only(dir)?;
-    check_admin_only(&exe)?;
+    check_install_path(&exe)?;
     Ok(exe)
 }
 

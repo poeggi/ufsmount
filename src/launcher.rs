@@ -18,7 +18,7 @@ use crate::device::{Device, Source, strip_prefix_ci};
 use crate::names::Charset;
 use crate::partition;
 use crate::security::{
-    ADMIN_ONLY_DIR, SecurityDescriptor, account_sid, check_admin_only, is_elevated, program_data,
+    ADMIN_ONLY_DIR, SecurityDescriptor, account_sid, check_install_path, is_elevated, program_data,
     secure_dir,
 };
 use crate::volume::Volume;
@@ -121,12 +121,8 @@ pub fn register() -> anyhow::Result<()> {
     anyhow::ensure!(is_elevated(), "register needs an elevated prompt");
     // The launcher runs the exe as SYSTEM: only administrators may be able to change it.
     let exe = std::env::current_exe()?;
-    let folder = exe
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("no folder for {}", exe.display()))?;
-    check_admin_only(folder)
-        .and_then(|()| check_admin_only(&exe))
-        .map_err(|e| anyhow::anyhow!("{e}. Install ufsmount.exe under Program Files first."))?;
+    check_install_path(&exe)
+        .map_err(|e| anyhow::anyhow!("{e:#}. Install ufsmount.exe under Program Files first."))?;
 
     let base = log_dir()?;
     // Only SYSTEM and Administrators: the launcher writes its logs there as SYSTEM.

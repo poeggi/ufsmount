@@ -3,7 +3,7 @@
 
 use std::ffi::c_void;
 use std::os::windows::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE, HLOCAL,
@@ -32,8 +32,10 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows::Win32::UI::Shell::{FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
-use windows::core::{BOOL, HRESULT, HSTRING, PWSTR};
+use windows::Win32::UI::Shell::{
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+};
+use windows::core::{BOOL, GUID, HRESULT, HSTRING, PWSTR};
 
 /// WinFsp asks with a 1024-byte buffer first and loops on larger descriptors.
 const MAX_SD: usize = 1024;
@@ -450,17 +452,65 @@ pub const ADMIN_ONLY_DIR: &str = "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 pub const ADMIN_DIR_USERS_READ: &str =
     "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)";
 
-/// The ProgramData folder, from the known-folder API. Environment variables
-/// are not used: any process of the user can set them for an elevated child.
-pub fn program_data() -> anyhow::Result<PathBuf> {
+fn known_folder(id: &GUID, name: &str) -> anyhow::Result<PathBuf> {
     // SAFETY: the returned string is freed with CoTaskMemFree after copying.
     unsafe {
-        let p = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None)
-            .map_err(|e| anyhow::anyhow!("cannot find ProgramData: {e}"))?;
+        let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None)
+            .map_err(|e| anyhow::anyhow!("cannot find {name}: {e}"))?;
         let s = p.to_string();
         CoTaskMemFree(Some(p.0.cast()));
         Ok(PathBuf::from(s?))
     }
+}
+
+/// The ProgramData folder, from the known-folder API. Environment variables
+/// are not used: any process of the user can set them for an elevated child.
+pub fn program_data() -> anyhow::Result<PathBuf> {
+    known_folder(&FOLDERID_ProgramData, "ProgramData")
+}
+
+/// Check where `exe` is installed: it runs elevated or as SYSTEM without
+/// asking. Its folder must be Program Files or lie below it. The exe and every
+/// folder below Program Files down to it must be admin-only, and none may be a
+/// junction or symlink.
+pub fn check_install_path(exe: &Path) -> anyhow::Result<()> {
+    check_below(&known_folder(&FOLDERID_ProgramFiles, "Program Files")?, exe)
+}
+
+/// [`check_install_path`] with another trusted `root`. From the top down: once
+/// a folder passes, nobody else can rename or replace what lies in it.
+fn check_below(root: &Path, exe: &Path) -> anyhow::Result<()> {
+    let folders = exe
+        .parent()
+        .and_then(|dir| folders_below(root, dir))
+        .ok_or_else(|| anyhow::anyhow!("{} is not under {}", exe.display(), root.display()))?;
+    for dir in &folders {
+        check_admin_only(dir)?;
+    }
+    check_admin_only(exe)
+}
+
+/// The folders from just below `root` down to `dir`, top first, spelled as in
+/// `dir`. None unless `dir` is `root` or lies below it. Case is ignored; `..`
+/// is refused.
+fn folders_below(root: &Path, dir: &Path) -> Option<Vec<PathBuf>> {
+    let mut rest = dir.components();
+    let mut cur = PathBuf::new();
+    for want in root.components() {
+        let got = rest.next()?;
+        if !got.as_os_str().eq_ignore_ascii_case(want.as_os_str()) {
+            return None;
+        }
+        cur.push(got);
+    }
+    rest.map(|c| match c {
+        Component::Normal(name) => {
+            cur.push(name);
+            Some(cur.clone())
+        }
+        _ => None,
+    })
+    .collect()
 }
 
 /// Make `dir` a real folder owned by Administrators with the protected DACL of
@@ -607,6 +657,41 @@ mod tests {
             check_admin_only(&tmp).is_err(),
             "a user temp folder is user-writable"
         );
+    }
+
+    #[test]
+    fn install_folders() {
+        let root = Path::new(r"C:\Program Files");
+        let f = |d: &str| folders_below(root, Path::new(d));
+        let p = PathBuf::from;
+        assert_eq!(f(r"C:\Program Files"), Some(vec![]));
+        assert_eq!(
+            f(r"c:\program files\ufsmount"),
+            Some(vec![p(r"c:\program files\ufsmount")])
+        );
+        assert_eq!(
+            f(r"C:\Program Files\a\b"),
+            Some(vec![p(r"C:\Program Files\a"), p(r"C:\Program Files\a\b")])
+        );
+        for bad in [
+            r"C:\",
+            r"C:\Users\a",
+            r"D:\Program Files\a",
+            r"C:\Program Files (x86)\a",
+            r"C:\Program Files\..\Users\a",
+            r"\\?\C:\Program Files\a",
+        ] {
+            assert_eq!(f(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn install_path_check() {
+        let windows = PathBuf::from(std::env::var("SystemRoot").unwrap());
+        check_below(&windows, &windows.join(r"System32\notepad.exe")).unwrap();
+        let tmp = std::env::temp_dir();
+        assert!(check_below(tmp.parent().unwrap(), &tmp.join("x.exe")).is_err());
+        assert!(check_install_path(&std::env::current_exe().unwrap()).is_err());
     }
 
     #[test]

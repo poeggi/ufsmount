@@ -41,9 +41,14 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// The task definition. `sid` is the user it runs for; `exe` a literal path.
-pub fn task_xml(exe: &Path, sid: &str, logon: bool) -> String {
+/// Task Scheduler expands `%VAR%` in the command, so a `%` is refused.
+pub fn task_xml(exe: &Path, sid: &str, logon: bool) -> anyhow::Result<String> {
+    let exe = exe
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("not a Unicode path: {}", exe.display()))?;
+    anyhow::ensure!(!exe.contains('%'), "{exe}: a task command cannot hold %");
     let sid = xml_escape(sid);
-    let exe = xml_escape(&exe.to_string_lossy());
+    let exe = xml_escape(exe);
     let triggers = if logon {
         format!(
             "    <LogonTrigger>\n      <Enabled>true</Enabled>\n      <UserId>{sid}</UserId>\n    </LogonTrigger>\n"
@@ -51,7 +56,7 @@ pub fn task_xml(exe: &Path, sid: &str, logon: bool) -> String {
     } else {
         String::new()
     };
-    format!(
+    Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -94,7 +99,7 @@ pub fn task_xml(exe: &Path, sid: &str, logon: bool) -> String {
   </Actions>
 </Task>
 "#
-    )
+    ))
 }
 
 fn schtasks(args: &str) -> anyhow::Result<u32> {
@@ -133,7 +138,7 @@ pub fn install(logon: bool) -> anyhow::Result<()> {
         log::info!("no signed-in user; task {TASK_NAME} not created");
         return Ok(());
     }
-    let xml = task_xml(&exe, &sid, logon);
+    let xml = task_xml(&exe, &sid, logon)?;
     let file = base_dir()?.join("task.xml");
     let mut bytes = vec![0xff, 0xfe];
     bytes.extend(xml.encode_utf16().flat_map(|u| u.to_le_bytes()));
@@ -185,7 +190,7 @@ mod tests {
     #[test]
     fn task_definition() {
         let exe = Path::new(r"C:\Program Files\ufsmount\ufsmount-tray.exe");
-        let x = task_xml(exe, "S-1-5-21-1-2-3-1001", false);
+        let x = task_xml(exe, "S-1-5-21-1-2-3-1001", false).unwrap();
         assert!(x.contains(r"<Command>C:\Program Files\ufsmount\ufsmount-tray.exe</Command>"));
         assert!(x.contains("<Arguments>--from-task</Arguments>"));
         assert!(x.contains("<UserId>S-1-5-21-1-2-3-1001</UserId>"));
@@ -197,7 +202,16 @@ mod tests {
         assert!(x.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
         assert!(!x.contains("LogonTrigger"));
         assert!(!x.contains('%'));
-        assert!(task_xml(exe, "S-1-5-21-1-2-3-1001", true).contains("<LogonTrigger>"));
-        assert!(task_xml(Path::new("a&b"), "x", false).contains("a&amp;b"));
+        assert!(
+            task_xml(exe, "S-1-5-21-1-2-3-1001", true)
+                .unwrap()
+                .contains("<LogonTrigger>")
+        );
+        assert!(
+            task_xml(Path::new("a&b"), "x", false)
+                .unwrap()
+                .contains("a&amp;b")
+        );
+        assert!(task_xml(Path::new(r"C:\Program Files\%x%\a.exe"), "x", false).is_err());
     }
 }

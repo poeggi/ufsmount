@@ -14,6 +14,7 @@ pub mod task;
 mod ui;
 pub mod worker;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -54,6 +55,20 @@ fn parse(args: &[String]) -> Result<Mode, String> {
         ["--source", path] => Ok(Mode::Source(PathBuf::from(path))),
         _ => Err(format!("unknown arguments: {}", args.join(" "))),
     }
+}
+
+/// [`parse`] for the raw arguments. Empty ones are dropped (some launchers
+/// pass them); one that is not Unicode is unknown.
+fn parse_os(args: impl IntoIterator<Item = OsString>) -> Result<Mode, String> {
+    let args = args
+        .into_iter()
+        .filter(|a| !a.is_empty())
+        .map(|a| {
+            a.into_string()
+                .map_err(|a| format!("unknown argument: {}", a.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    parse(&args)
 }
 
 fn fail(text: &str) -> ExitCode {
@@ -120,9 +135,7 @@ pub fn main() -> ExitCode {
         unsafe { sys::reset_environment() };
     }
     crate::winfs::harden_dll_search();
-    // Some launchers pass empty arguments.
-    let args: Vec<String> = std::env::args().skip(1).filter(|a| !a.is_empty()).collect();
-    let mode = match parse(&args) {
+    let mode = match parse_os(std::env::args_os().skip(1)) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("{e}");
@@ -157,6 +170,10 @@ pub fn main() -> ExitCode {
             }
         },
         Mode::InstallTask { logon } => {
+            if !is_elevated() {
+                eprintln!("install task: needs administrator rights");
+                return ExitCode::FAILURE;
+            }
             start_log();
             match task::install(logon) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -220,5 +237,16 @@ mod tests {
         // The task-started tray takes nothing else.
         assert!(p(&["--from-task", "--source", "x.img"]).is_err());
         assert!(p(&["--source"]).is_err());
+    }
+
+    #[test]
+    fn raw_arguments() {
+        use std::os::windows::ffi::OsStringExt;
+        let os = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(parse_os(os(&["", "--quit", ""])), Ok(Mode::Quit));
+        assert_eq!(parse_os(os(&[])), Ok(Mode::Start));
+        // An unpaired surrogate.
+        let bad = OsString::from_wide(&[u16::from(b'x'), 0xd800]);
+        assert!(parse_os([bad]).is_err());
     }
 }

@@ -94,6 +94,63 @@ fn disk_gone_during_use() {
     assert!(vol.device().is_gone());
 }
 
+/// ufs-little with dir2's entry for dir3 changed by `patch`, which gets the
+/// image, the entry's offset and dir2's inode number (bytes, as on disk).
+fn with_dir3_entry(patch: impl FnOnce(&mut [u8], usize, [u8; 4])) -> Volume {
+    let mut img = image_bytes("ufs-little");
+    // struct direct: d_ino u32, d_reclen u16, d_type u8, d_namlen u8, d_name.
+    let entry = find(&img, b"\x04\x04dir3") - 6;
+    let chunk = entry / 512 * 512;
+    assert_eq!(&img[chunk + 6..chunk + 9], b"\x04\x01.", "dir2's . entry");
+    let dir2 = img[chunk..chunk + 4].try_into().unwrap();
+    patch(&mut img, entry, dir2);
+    volume(FakeDisk::new(img, 512))
+}
+
+fn cp_dir1(vol: &Volume, tag: &str) -> (ufsmount::copy::Stats, std::path::PathBuf) {
+    let out = temp_path(tag);
+    std::fs::create_dir_all(&out).unwrap();
+    let stats = ufsmount::copy::cp(vol, "/dir1", &out).unwrap();
+    (stats, out)
+}
+
+fn remove_tree(dir: &std::path::Path) {
+    std::fs::remove_dir_all(format!(r"\\?\{}", dir.display())).unwrap();
+}
+
+#[test]
+fn cp_keeps_crafted_names_inside() {
+    let mut img = image_bytes("ufs-little");
+    let at = find(&img, b"\x08\x05file2");
+    img[at + 2..at + 7].copy_from_slice(b"../x2");
+    let vol = volume(FakeDisk::new(img, 512));
+
+    let (stats, out) = cp_dir1(&vol, "cp-crafted");
+    assert_eq!((stats.files, stats.failed), (1, 0));
+    assert!(!out.join(r"dir1\dir2\x2").exists());
+    assert!(out.join(r"dir1\dir2\dir3").join("..\u{f02f}x2").exists());
+    remove_tree(&out);
+}
+
+#[test]
+fn cp_stops_at_a_directory_loop() {
+    let vol = with_dir3_entry(|img, entry, dir2| img[entry..entry + 4].copy_from_slice(&dir2));
+    let (stats, out) = cp_dir1(&vol, "cp-loop");
+    assert_eq!(stats.failed, 1);
+    remove_tree(&out);
+}
+
+#[test]
+fn cp_skips_an_empty_name() {
+    let vol = with_dir3_entry(|img, entry, dir2| {
+        img[entry..entry + 4].copy_from_slice(&dir2);
+        img[entry + 7] = 0;
+    });
+    let (stats, out) = cp_dir1(&vol, "cp-empty");
+    assert_eq!(stats.failed, 1);
+    remove_tree(&out);
+}
+
 #[test]
 fn cp_tree() {
     let img = write_temp("cp", &image_bytes("ufs-big"));

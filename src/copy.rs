@@ -178,7 +178,19 @@ pub fn cp(vol: &Volume, from: &str, to: &Path) -> anyhow::Result<Stats> {
         )));
     }
     let mut stats = Stats::default();
-    copy_node(vol, &node, &dest, 0, &mut HashSet::new(), &mut stats);
+    // One stack frame per directory level: MAX_DEPTH levels need more than
+    // the main thread's 1 MiB in a debug build.
+    std::thread::scope(|s| -> anyhow::Result<()> {
+        let worker = std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn_scoped(s, || {
+                copy_node(vol, &node, &dest, 0, &mut HashSet::new(), &mut stats)
+            })?;
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+        Ok(())
+    })?;
     Ok(stats)
 }
 

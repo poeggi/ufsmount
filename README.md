@@ -21,6 +21,8 @@ The command-line tool alone:
 
 Run `ufsmount-<version>-setup.exe`. It installs to `C:\Program Files\ufsmount`.
 
+<img src="docs/setup.png" width="480" alt="The ufsmount setup wizard">
+
 The setup is not signed:
 
 - SmartScreen warns. Click "More info", then "Run anyway".

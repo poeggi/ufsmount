@@ -5,7 +5,7 @@ Write support is not a feature. UFS1 is not supported (rufs has no UFS1).
 
 ## Layout
 - `src/` the crate: CLI (`main.rs`), library (`lib.rs`), tray (`tray/`, `bin/ufsmount-tray.rs`).
-- `installer/` Inno Setup scripts. `logos/` logo, icon, wizard images.
+- `installer/` Inno Setup scripts. `logos/` logo, icon, wizard images. `docs/` images for the README.
 - `vendor/fuse-ufs/` upstream fuse-ufs with rufs, a git subtree. See rufs.md.
 - All build output and other temporary files go to `temp/` (git-ignored; set in `.cargo/config.toml`).
   The setup lands in `temp/installer`. Nothing built is committed: releases carry the exes and the setup.

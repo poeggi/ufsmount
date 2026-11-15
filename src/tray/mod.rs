@@ -114,6 +114,11 @@ fn start() -> ExitCode {
 }
 
 pub fn main() -> ExitCode {
+    if is_elevated() {
+        // SAFETY: no other thread runs yet, so nothing reads the environment
+        // while it changes. Windows also serializes environment access itself.
+        unsafe { sys::reset_environment() };
+    }
     crate::winfs::harden_dll_search();
     // Some launchers pass empty arguments.
     let args: Vec<String> = std::env::args().skip(1).filter(|a| !a.is_empty()).collect();

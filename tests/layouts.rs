@@ -175,7 +175,8 @@ fn explicit_part_and_errors() {
 fn not_clean() {
     let mut img = image_bytes("ufs-little");
     img[65536 + 209] = 0;
-    let (vol, _) = open(&write_temp("dirty", &img), None);
+    let path = write_temp("dirty", &img);
+    let (vol, _) = open(&path, None);
     assert!(!vol.info.clean);
     assert_eq!(root_names(&vol), ROOT_NAMES);
 }
@@ -187,7 +188,8 @@ fn odd_names() {
     img[at] = 0xff;
     let at = find(&img, b"\x08\x05file3") + 4;
     img[at] = b':';
-    let (vol, _) = open(&write_temp("names", &img), None);
+    let path = write_temp("names", &img);
+    let (vol, _) = open(&path, None);
     let names = root_names(&vol);
     assert!(names.contains(&"\u{f1ff}ile1".to_string()), "{names:?}");
     assert!(names.contains(&"fi\u{f03a}e3".to_string()), "{names:?}");
@@ -204,6 +206,7 @@ fn deleted_first_entry() {
     let mut img = image_bytes("ufs-little");
     let at = find(&img, b"\x02\x00\x00\x00\x0c\x00\x04\x01.");
     img[at..at + 4].fill(0);
-    let (vol, _) = open(&write_temp("deleted", &img), None);
+    let path = write_temp("deleted", &img);
+    let (vol, _) = open(&path, None);
     assert_eq!(root_names(&vol), ROOT_NAMES);
 }

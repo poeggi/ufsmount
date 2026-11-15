@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use common::*;
+use windows::Win32::Storage::FileSystem::GetLogicalDrives;
 use windows::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
 
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -65,11 +66,14 @@ fn free_letter() -> char {
     free_letter_in('M'..='Z')
 }
 
-/// Each test uses its own range of letters.
+/// Each test uses its own range of letters. GetLogicalDrives also reports
+/// letters whose root cannot be opened, such as an empty card reader.
 fn free_letter_in(range: std::ops::RangeInclusive<char>) -> char {
+    // SAFETY: no arguments.
+    let used = unsafe { GetLogicalDrives() };
     range
         .rev()
-        .find(|l| !Path::new(&format!("{l}:\\")).exists())
+        .find(|&l| used & (1 << (l as u32 - 'A' as u32)) == 0)
         .expect("no free drive letter")
 }
 

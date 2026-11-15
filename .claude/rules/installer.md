@@ -10,7 +10,7 @@
   Pascal script cannot read that type.
 - Inno Setup 7.1.1 clips the task checkboxes on the left at high DPI, in every wizard style.
   Fixed upstream in issrc commit 5b4c39b (after 7.1.1). Update the pin in `ci.yml` once a release has it.
-- `assets/wizard/*.png` are rendered from `assets/logo.svg` at the sizes the help lists per DPI.
+- `logos/wizard/*.png` are rendered from `logos/logo.svg` at the sizes the help lists per DPI.
 - The setup is unsigned: SmartScreen warns, Smart App Control blocks it.
 
 ## Tray (`src/tray`)

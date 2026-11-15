@@ -5,9 +5,10 @@ Write support is not a feature. UFS1 is not supported (rufs has no UFS1).
 
 ## Layout
 - `src/` the crate: CLI (`main.rs`), library (`lib.rs`), tray (`tray/`, `bin/ufsmount-tray.rs`).
-- `installer/` Inno Setup scripts. `assets/` logo, icon, wizard images.
+- `installer/` Inno Setup scripts. `logos/` logo, icon, wizard images.
 - `vendor/fuse-ufs/` upstream fuse-ufs with rufs, a git subtree. See rufs.md.
-- All build output goes to `target/` (git-ignored). The setup lands in `target/installer`.
+- All build output and other temporary files go to `temp/` (git-ignored; set in `.cargo/config.toml`).
+  The setup lands in `temp/installer`. Nothing built is committed: releases carry the exes and the setup.
 
 ## Build and test
 - Rust stable, MSVC target, VS Build Tools (C++), LLVM (libclang for bindgen in winfsp-sys).
@@ -15,7 +16,7 @@ Write support is not a feature. UFS1 is not supported (rufs has no UFS1).
 - Mount tests need WinFsp and run only with `UFSMOUNT_MOUNT_TEST=1`.
   Tests in `tests/mount.rs` run in parallel; each test uses its own drive letter range.
 - rufs tests: `cargo test --manifest-path vendor/fuse-ufs/Cargo.toml -p rufs --locked --ignore-rust-version`,
-  with `CARGO_TARGET_DIR=target/vendor`.
+  with `CARGO_TARGET_DIR=temp/vendor`.
 - WinFsp minimum version: `installer/winfsp.iss` is the one source. A Rust test checks `MIN_WINFSP` against it.
 - `winfsp-x64.dll` is delay-loaded by full path from the WinFsp InstallDir, never from the exe folder.
 

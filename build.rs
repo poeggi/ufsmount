@@ -27,11 +27,11 @@ fn main() {
     // Static imports are searched in System32 only, never in the exe folder.
     println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=assets/ufsmount.ico");
+    println!("cargo:rerun-if-changed=logos/ufsmount.ico");
 
     // The logo as the icon (resource id 1, also used by the tray), plus version info.
     let mut cli = winresource::WindowsResource::new();
-    cli.set_icon_with_id("assets/ufsmount.ico", "1").set(
+    cli.set_icon_with_id("logos/ufsmount.ico", "1").set(
         "FileDescription",
         "ufsmount - mount FreeBSD UFS2 disks read-only",
     );
@@ -39,7 +39,7 @@ fn main() {
         .expect("compile the resources of ufsmount");
 
     let mut tray = winresource::WindowsResource::new();
-    tray.set_icon_with_id("assets/ufsmount.ico", "1")
+    tray.set_icon_with_id("logos/ufsmount.ico", "1")
         .set("FileDescription", "ufsmount tray")
         .set_manifest(TRAY_MANIFEST);
     tray.compile_for("ufsmount-tray")

@@ -1,10 +1,15 @@
 # winfsp-ufs
 
-<img src="assets/logo.svg" width="96" alt="ufsmount logo">
+<img src="logos/logo.svg" width="96" alt="ufsmount logo">
 
 Mount a FreeBSD UFS2 disk on Windows as a read-only drive.
 `ufsmount.exe` reads the raw disk and serves the files through WinFsp.
 Explorer, copy and robocopy work as on any drive.
+
+**Download:** [latest release](https://github.com/poeggi/winfsp-ufs/releases/latest)
+(setup, `SHA256SUMS`, licenses).
+The command-line tool alone:
+[ufsmount.exe](https://github.com/poeggi/winfsp-ufs/releases/latest/download/ufsmount.exe).
 
 ## Requirements
 
@@ -15,7 +20,7 @@ Explorer, copy and robocopy work as on any drive.
 
 ## Install
 
-1. Download `ufsmount-<version>-setup.exe` from the [releases](../../releases).
+1. Download `ufsmount-<version>-setup.exe` from the [latest release](https://github.com/poeggi/winfsp-ufs/releases/latest).
 2. Run it. It installs to `C:\Program Files\ufsmount`.
 
 The setup is not signed yet:
@@ -103,7 +108,7 @@ cargo test
 The WinFsp mount test runs with `UFSMOUNT_MOUNT_TEST=1`.
 
 The setup needs [Inno Setup](https://jrsoftware.org/isinfo.php) 7.1.1:
-`ISCC /DAppVersion=<version> installer\ufsmount.iss`. It goes to `target\installer`.
+`ISCC /DAppVersion=<version> installer\ufsmount.iss`. It goes to `temp\installer`.
 
 ## Credits
 

@@ -1,5 +1,5 @@
 ; ufsmount setup (Inno Setup 7). Build: ISCC /DAppVersion=x.y.z installer\ufsmount.iss
-; Expects target\release\ufsmount.exe and target\release\ufsmount-tray.exe.
+; Expects temp\release\ufsmount.exe and temp\release\ufsmount-tray.exe.
 
 #include "winfsp.iss"
 
@@ -28,15 +28,15 @@ MinVersion=10.0
 SetupArchitecture=x64
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
-OutputDir=..\target\installer
+OutputDir=..\temp\installer
 OutputBaseFilename=ufsmount-{#AppVersion}-setup
-SetupIconFile=..\assets\ufsmount.ico
+SetupIconFile=..\logos\ufsmount.ico
 UninstallDisplayIcon={app}\ufsmount-tray.exe
 UninstallDisplayName=ufsmount
 WizardStyle=modern
 ; Sizes per DPI as listed for these directives in the Inno Setup help.
-WizardImageFile=..\assets\wizard\large-*.png
-WizardSmallImageFile=..\assets\wizard\small-*.png
+WizardImageFile=..\logos\wizard\large-*.png
+WizardSmallImageFile=..\logos\wizard\small-*.png
 Compression=lzma2
 SolidCompression=yes
 SetupLogging=yes
@@ -50,8 +50,8 @@ Name: path; Description: "Add ufsmount to the PATH, for the command line"
 Name: launcher; Description: "Register with the WinFsp launcher, for net use \\ufs\..."; Flags: unchecked
 
 [Files]
-Source: "..\target\release\ufsmount.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\ufsmount-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\temp\release\ufsmount.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\temp\release\ufsmount-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"
 Source: "..\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"
 Source: "..\licenses\GPL-3.0.txt"; DestDir: "{app}"

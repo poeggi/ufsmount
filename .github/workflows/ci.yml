@@ -43,6 +43,8 @@ jobs:
           rustup default stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> temp"
 
       - name: Format
         run: cargo fmt --check
@@ -70,7 +72,7 @@ jobs:
       - name: Test rufs
         run: cargo test --manifest-path vendor/fuse-ufs/Cargo.toml -p rufs --locked --ignore-rust-version
         env:
-          CARGO_TARGET_DIR: target/vendor
+          CARGO_TARGET_DIR: temp/vendor
 
       - name: Release build
         run: cargo build --release --locked
@@ -109,9 +111,9 @@ jobs:
         with:
           name: ufsmount
           path: |
-            target/release/ufsmount.exe
-            target/release/ufsmount-tray.exe
-            target/installer/ufsmount-*-setup.exe
+            temp/release/ufsmount.exe
+            temp/release/ufsmount-tray.exe
+            temp/installer/ufsmount-*-setup.exe
             LICENSE
             THIRD-PARTY-NOTICES.txt
             licenses/*.txt

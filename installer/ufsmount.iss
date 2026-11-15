@@ -228,12 +228,17 @@ begin
 end;
 
 procedure InitializeWizard;
+var
+  Offset: Integer;
 begin
-  { Offset is the room left of a task checkbox and between it and its text.
-    Inno Setup 7.1.1 reserves too little room for the checkbox at high DPI and
-    clips it (fixed upstream after 7.1.1), so the growth of the 13 px checkbox
-    is added. }
-  WizardForm.TasksList.Offset := ScaleX(8) + ScaleX(13) - 13;
+  { Offset is the room left of a checkbox in these lists and between it and
+    its text. Inno Setup 7.1.1 reserves too little room for the checkbox at
+    high DPI and clips it (fixed upstream after 7.1.1), so the growth of the
+    13 px checkbox is added. }
+  Offset := ScaleX(8) + ScaleX(13) - 13;
+  WizardForm.ComponentsList.Offset := Offset;
+  WizardForm.TasksList.Offset := Offset;
+  WizardForm.RunList.Offset := Offset;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);

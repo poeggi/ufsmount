@@ -8,8 +8,10 @@
 - An older version over a newer one asks first. Silent installs need `/ALLOWDOWNGRADE` for it.
 - PATH is edited by `ufsmount-tray --add-to-path` and `--remove-from-path`, which keep the registry type.
   Pascal script cannot read that type.
-- Inno Setup 7.1.1 clips the task checkboxes on the left at high DPI, in every wizard style.
-  Fixed upstream in issrc commit 5b4c39b (after 7.1.1). Update the pin in `ci.yml` once a release has it.
+- Inno Setup 7.1.1 clips checkboxes in lists on the left at high DPI, in every wizard style.
+  `InitializeWizard` gives every wizard list (components, tasks, run) more room through `Offset`.
+  A new checkbox list must get the same. Fixed upstream in issrc commit 5b4c39b (after 7.1.1);
+  update the pin in `ci.yml` once a release has it.
 - `logos/wizard/*.png` are rendered from `logos/logo.svg` at the sizes the help lists per DPI.
 - The setup is unsigned: SmartScreen warns, Smart App Control blocks it.
 

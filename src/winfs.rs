@@ -2,6 +2,7 @@
 //! The WinFsp file system: read-only, every write path reports write protection.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
@@ -681,19 +682,52 @@ impl Drop for Mount {
 const WATCH_EVERY: Duration = Duration::from_secs(2);
 
 /// FspServiceLoop calls the start callback at once unless it fails before.
-/// Without that call for this long, `serve()` just waits for the loop's result.
+/// Without that call for this long, `serve()` stops waiting for it and takes
+/// the loop's result.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the unmount of a gone disk may take before the process exits
+/// without it. A read stuck on a dying disk holds up the dispatcher threads,
+/// and with them the unmount.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The disk of a `serve()` mount went away. The mount is stopped and unmounted.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}: the disk is gone, unmounted")]
 pub struct DiskGone(pub String);
 
-/// What the service callbacks tell `serve()`.
-#[derive(Debug)]
-enum Event {
-    Starting,
-    Ended,
+/// Whether the start callback ran. Once `serve()` gives up waiting for it, a
+/// start is refused: nothing would watch the disk.
+struct StartGate(AtomicU8);
+
+impl StartGate {
+    const WAITING: u8 = 0;
+    const STARTED: u8 = 1;
+    const ABANDONED: u8 = 2;
+
+    fn new() -> StartGate {
+        StartGate(AtomicU8::new(Self::WAITING))
+    }
+
+    /// The start callback asks first. False once `serve()` gave up.
+    fn start(&self) -> bool {
+        self.leave_waiting(Self::STARTED)
+    }
+
+    /// Stop waiting for the start. False when the start callback ran first.
+    fn abandon(&self) -> bool {
+        self.leave_waiting(Self::ABANDONED)
+    }
+
+    fn started(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == Self::STARTED
+    }
+
+    fn leave_waiting(&self, to: u8) -> bool {
+        self.0
+            .compare_exchange(Self::WAITING, to, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
 }
 
 /// Why `wait_for_end` returned.
@@ -704,25 +738,30 @@ enum End {
     DiskGone,
 }
 
-/// Wait for the service to end. Asks `alive` every `every`.
+/// Wait for a message on `ended` (the service ended). Asks `alive` every
+/// `every`. From `start_timeout` on, asks `abandon_start` once: true means the
+/// start callback did not run and will not, so waiting ends.
 fn wait_for_end(
-    events: &Receiver<Event>,
+    ended: &Receiver<()>,
     every: Duration,
     start_timeout: Duration,
     mut alive: impl FnMut() -> bool,
+    mut abandon_start: impl FnMut() -> bool,
 ) -> End {
     let begin = Instant::now();
-    let mut starting = false;
+    let mut started = false;
     loop {
-        match events.recv_timeout(every) {
-            Ok(Event::Starting) => starting = true,
-            Ok(Event::Ended) | Err(RecvTimeoutError::Disconnected) => return End::Stopped,
+        match ended.recv_timeout(every) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return End::Stopped,
             Err(RecvTimeoutError::Timeout) => {
                 if !alive() {
                     return End::DiskGone;
                 }
-                if !starting && begin.elapsed() >= start_timeout {
-                    return End::Stopped;
+                if !started && begin.elapsed() >= start_timeout {
+                    if abandon_start() {
+                        return End::Stopped;
+                    }
+                    started = true;
                 }
             }
         }
@@ -743,12 +782,20 @@ pub fn serve(
     // winfsp-rs does not expose; keep the reason here.
     let failure: Arc<Mutex<Option<String>>> = Arc::default();
     let fail = failure.clone();
+    let gate = Arc::new(StartGate::new());
+    let start_gate = gate.clone();
     let dev = vol.device().clone();
-    let (tx, events) = mpsc::channel();
+    let (tx, ended) = mpsc::channel();
     let stop_tx = tx.clone();
     let mut service = FileSystemServiceBuilder::new()
         .with_start(move || {
-            let _ = tx.send(Event::Starting);
+            if !start_gate.start() {
+                log::error!(
+                    "the WinFsp service started after {} s, too late",
+                    START_TIMEOUT.as_secs()
+                );
+                return Err(status(STATUS_UNSUCCESSFUL));
+            }
             // A service stop before this callback does nothing: refuse a disk found gone.
             let mount = if vol.device().is_gone() {
                 Err(anyhow::anyhow!("{}: the disk is gone", vol.device().name()))
@@ -775,7 +822,7 @@ pub fn serve(
                 Err(e) => {
                     log::error!("{e:#}");
                     *fail.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!("{e:#}"));
-                    let _ = tx.send(Event::Ended);
+                    let _ = tx.send(());
                     Err(status(STATUS_UNSUCCESSFUL))
                 }
             }
@@ -784,7 +831,7 @@ pub fn serve(
             if let Some(m) = mount {
                 m.stop();
             }
-            let _ = stop_tx.send(Event::Ended);
+            let _ = stop_tx.send(());
             Ok(())
         })
         .build("ufsmount", init)
@@ -792,13 +839,30 @@ pub fn serve(
     service
         .start()
         .map_err(|e| anyhow::anyhow!("cannot start: {e:?}"))?;
-    let end = wait_for_end(&events, WATCH_EVERY, START_TIMEOUT, || dev.is_alive());
-    if end == End::DiskGone {
+    let end = wait_for_end(
+        &ended,
+        WATCH_EVERY,
+        START_TIMEOUT,
+        || dev.is_alive(),
+        || gate.abandon(),
+    );
+    let joined = if end == End::DiskGone {
+        // The deadline thread ends when `_stopped` drops after the join.
+        let (_stopped, stopping) = mpsc::channel::<()>();
+        let name = dev.name().to_string();
+        std::thread::spawn(move || {
+            if let Err(RecvTimeoutError::Timeout) = stopping.recv_timeout(STOP_TIMEOUT) {
+                log::error!("{name}: the disk is gone, the unmount did not finish");
+                std::process::exit(3);
+            }
+        });
         // FspServiceStop runs the stop callback here: stop and unmount.
         service.stop();
-    }
-    let joined = service.join();
-    if end == End::DiskGone {
+        service.join()
+    } else {
+        service.join()
+    };
+    if dev.is_gone() {
         return Err(DiskGone(dev.name().to_string()).into());
     }
     joined.map_err(|e| anyhow::anyhow!("the file system stopped with an error: {e:?}"))?;
@@ -808,6 +872,9 @@ pub fn serve(
         .take()
     {
         anyhow::bail!(e);
+    }
+    if !gate.started() {
+        anyhow::bail!("the WinFsp service did not start");
     }
     Ok(())
 }
@@ -896,22 +963,60 @@ mod tests {
     fn service_end_and_disk_watch() {
         let ms = Duration::from_millis;
         let (tx, rx) = mpsc::channel();
-        tx.send(Event::Starting).unwrap();
-        tx.send(Event::Ended).unwrap();
-        assert_eq!(wait_for_end(&rx, ms(1), ms(1), || true), End::Stopped);
+        tx.send(()).unwrap();
+        assert_eq!(
+            wait_for_end(&rx, ms(1), ms(1), || true, || true),
+            End::Stopped
+        );
 
-        tx.send(Event::Starting).unwrap();
         let mut checks = 0;
         let alive = || {
             checks += 1;
             checks < 5
         };
-        assert_eq!(wait_for_end(&rx, ms(1), ms(1), alive), End::DiskGone);
-        assert_eq!(wait_for_end(&rx, ms(1), ms(1), || false), End::DiskGone);
+        assert_eq!(
+            wait_for_end(&rx, ms(1), ms(10_000), alive, || true),
+            End::DiskGone
+        );
+        assert_eq!(
+            wait_for_end(&rx, ms(1), ms(1), || false, || true),
+            End::DiskGone
+        );
 
-        assert_eq!(wait_for_end(&rx, ms(1), ms(20), || true), End::Stopped);
+        // Started: the disk is still watched after the start timeout.
+        let gate = StartGate::new();
+        assert!(gate.start());
+        let mut asked = 0;
+        let mut checks = 0;
+        let alive = || {
+            checks += 1;
+            checks < 20
+        };
+        let abandon = || {
+            asked += 1;
+            gate.abandon()
+        };
+        assert_eq!(
+            wait_for_end(&rx, ms(1), ms(1), alive, abandon),
+            End::DiskGone
+        );
+        assert_eq!(asked, 1);
+        assert!(gate.started());
+
+        // Not started: waiting ends after the start timeout, a late start is refused.
+        let gate = StartGate::new();
+        assert_eq!(
+            wait_for_end(&rx, ms(1), ms(20), || true, || gate.abandon()),
+            End::Stopped
+        );
+        assert!(!gate.start());
+        assert!(!gate.started());
+
         drop(tx);
-        assert_eq!(wait_for_end(&rx, ms(1), ms(10_000), || true), End::Stopped);
+        assert_eq!(
+            wait_for_end(&rx, ms(1), ms(10_000), || true, || true),
+            End::Stopped
+        );
     }
 
     #[test]

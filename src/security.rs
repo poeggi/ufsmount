@@ -5,10 +5,13 @@ use std::ffi::c_void;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE, HLOCAL,
+    LocalFree, WIN32_ERROR,
+};
 use windows::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+    SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
     ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, GetAce,
@@ -19,13 +22,18 @@ use windows::Win32::Security::{
     TokenElevation, TokenUser,
 };
 use windows::Win32::Security::{
-    PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, SetFileSecurityW,
+    PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, SetKernelObjectSecurity,
 };
-use windows::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT};
+use windows::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+    OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
-use windows::core::{BOOL, HSTRING, PWSTR};
+use windows::core::{BOOL, HRESULT, HSTRING, PWSTR};
 
 /// WinFsp asks with a 1024-byte buffer first and loops on larger descriptors.
 const MAX_SD: usize = 1024;
@@ -240,23 +248,75 @@ unsafe fn allow_aces(dacl: *const ACL) -> anyhow::Result<Vec<(String, u32)>> {
     Ok(out)
 }
 
-/// Check that only SYSTEM, Administrators and TrustedInstaller own or can
-/// change `path`. Used before the launcher is told to run a file as SYSTEM.
+/// A kernel handle, closed on drop.
+pub(crate) struct Handle(pub(crate) HANDLE);
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        // SAFETY: the handle is owned.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Open `path` itself: a junction or symlink there is opened, not followed.
+fn open_no_follow(path: &Path, access: u32) -> windows::core::Result<Handle> {
+    // SAFETY: the path lives through the call; the handle goes to the guard.
+    unsafe {
+        CreateFileW(
+            &HSTRING::from(path.as_os_str()),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    }
+    .map(Handle)
+}
+
+/// The attributes of an open file or folder.
+fn attributes(h: &Handle, path: &Path) -> anyhow::Result<u32> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: valid handle and out pointer.
+    unsafe { GetFileInformationByHandle(h.0, &mut info) }
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    Ok(info.dwFileAttributes)
+}
+
+fn has_win32_code(e: &windows::core::Error, codes: &[WIN32_ERROR]) -> bool {
+    codes.iter().any(|c| e.code() == HRESULT::from_win32(c.0))
+}
+
+/// Check that `path` is no junction or symlink, and that only SYSTEM,
+/// Administrators and TrustedInstaller own or can change it.
 pub fn check_admin_only(path: &Path) -> anyhow::Result<()> {
+    let h = open_no_follow(path, READ_CONTROL.0 | FILE_READ_ATTRIBUTES.0)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    anyhow::ensure!(
+        attributes(&h, path)? & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
+        "{} is a junction or symlink",
+        path.display()
+    );
+    check_handle_admin_only(&h, path)
+}
+
+/// [`check_admin_only`] for an open file or folder.
+fn check_handle_admin_only(h: &Handle, path: &Path) -> anyhow::Result<()> {
     let mut owner = PSID::default();
     let mut dacl: *mut ACL = std::ptr::null_mut();
     let mut psd = PSECURITY_DESCRIPTOR::default();
     // SAFETY: out pointers are valid; psd is freed with LocalFree.
     let err = unsafe {
-        GetNamedSecurityInfoW(
-            &HSTRING::from(path.as_os_str()),
+        GetSecurityInfo(
+            h.0,
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             Some(&mut owner),
             None,
             Some(&mut dacl),
             None,
-            &mut psd,
+            Some(&mut psd),
         )
     };
     anyhow::ensure!(
@@ -282,7 +342,7 @@ pub fn check_admin_only(path: &Path) -> anyhow::Result<()> {
         }
         Ok(())
     })();
-    // SAFETY: psd was allocated by GetNamedSecurityInfoW.
+    // SAFETY: psd was allocated by GetSecurityInfo.
     unsafe { LocalFree(Some(HLOCAL(psd.0))) };
     result
 }
@@ -298,28 +358,16 @@ fn sid_to_string(sid: PSID) -> anyhow::Result<String> {
     }
 }
 
-/// The process token, closed on drop.
-struct Token(HANDLE);
-
-impl Token {
-    fn current() -> anyhow::Result<Token> {
-        let mut token = HANDLE::default();
-        // SAFETY: valid out pointer.
-        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)? };
-        Ok(Token(token))
-    }
-}
-
-impl Drop for Token {
-    fn drop(&mut self) {
-        // SAFETY: the handle was opened by OpenProcessToken.
-        let _ = unsafe { CloseHandle(self.0) };
-    }
+fn process_token() -> anyhow::Result<Handle> {
+    let mut token = HANDLE::default();
+    // SAFETY: valid out pointer.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)? };
+    Ok(Handle(token))
 }
 
 /// The SID of the user this process runs as.
 pub fn current_user_sid() -> anyhow::Result<String> {
-    let token = Token::current()?;
+    let token = process_token()?;
     // SAFETY: two-call pattern with a buffer of the reported size.
     unsafe {
         let mut needed = 0u32;
@@ -337,24 +385,28 @@ pub fn current_user_sid() -> anyhow::Result<String> {
     }
 }
 
-/// Whether this process runs elevated.
-pub fn is_elevated() -> bool {
-    let Ok(token) = Token::current() else {
-        return false;
-    };
+/// Whether `token` (open for TOKEN_QUERY) is elevated.
+pub(crate) fn token_elevated(token: HANDLE) -> anyhow::Result<bool> {
     let mut elevation = TOKEN_ELEVATION::default();
     let mut needed = 0u32;
     // SAFETY: the buffer is a properly sized TOKEN_ELEVATION.
-    let ok = unsafe {
+    unsafe {
         GetTokenInformation(
-            token.0,
+            token,
             TokenElevation,
             Some((&raw mut elevation).cast()),
             size_of::<TOKEN_ELEVATION>() as u32,
             &mut needed,
-        )
-    };
-    ok.is_ok() && elevation.TokenIsElevated != 0
+        )?;
+    }
+    Ok(elevation.TokenIsElevated != 0)
+}
+
+/// Whether this process runs elevated.
+pub fn is_elevated() -> bool {
+    process_token()
+        .and_then(|t| token_elevated(t.0))
+        .unwrap_or(false)
 }
 
 /// The SID of an account name such as `DOMAIN\user`.
@@ -415,38 +467,51 @@ pub fn program_data() -> anyhow::Result<PathBuf> {
 /// `sddl`. Elevated code writes there, so nobody else may have prepared it or
 /// its contents: a new folder gets its security at creation; an existing one is
 /// kept only if it is admin-only already, else it is emptied and created anew.
-/// A junction or symlink is refused.
+/// A junction or symlink is refused. An existing folder is checked and changed
+/// through one handle.
 pub fn secure_dir(dir: &Path, sddl: &str) -> anyhow::Result<()> {
     let sd = SecurityDescriptor::from_sddl(sddl)?;
-    match std::fs::symlink_metadata(dir) {
-        Ok(meta) => {
-            anyhow::ensure!(
-                meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
-                "{} is not a plain folder; remove it and try again",
-                dir.display()
-            );
-            if let Err(e) = check_admin_only(dir) {
-                log::warn!("{e:#}; creating it anew");
-                std::fs::remove_dir_all(dir)
-                    .map_err(|e| anyhow::anyhow!("cannot remove {}: {e}", dir.display()))?;
-                return create_dir_with(dir, &sd);
-            }
+    let access = READ_CONTROL.0 | WRITE_DAC.0 | WRITE_OWNER.0 | FILE_READ_ATTRIBUTES.0;
+    let h = match open_no_follow(dir, access) {
+        Ok(h) => h,
+        Err(e) if has_win32_code(&e, &[ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]) => {
+            return create_dir_with(dir, &sd);
         }
-        Err(_) => return create_dir_with(dir, &sd),
+        Err(e) if has_win32_code(&e, &[ERROR_ACCESS_DENIED]) => {
+            return create_anew(dir, &sd, anyhow::anyhow!("{}: {e}", dir.display()));
+        }
+        Err(e) => anyhow::bail!("cannot open {}: {e}", dir.display()),
+    };
+    let attrs = attributes(&h, dir)?;
+    anyhow::ensure!(
+        attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0 && attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
+        "{} is not a plain folder; remove it and try again",
+        dir.display()
+    );
+    if let Err(e) = check_handle_admin_only(&h, dir) {
+        drop(h);
+        return create_anew(dir, &sd, e);
     }
-    // SAFETY: sd outlives the call.
+    // Not SetSecurityInfo: it would also walk the children by path to
+    // propagate the inheritable ACEs.
+    // SAFETY: the handle is open for WRITE_DAC and WRITE_OWNER; sd outlives the call.
     unsafe {
-        SetFileSecurityW(
-            &HSTRING::from(dir.as_os_str()),
+        SetKernelObjectSecurity(
+            h.0,
             OWNER_SECURITY_INFORMATION
                 | DACL_SECURITY_INFORMATION
                 | PROTECTED_DACL_SECURITY_INFORMATION,
             sd.as_psd(),
         )
     }
-    .ok()
-    .map_err(|e| anyhow::anyhow!("cannot secure {}: {e}", dir.display()))?;
-    Ok(())
+    .map_err(|e| anyhow::anyhow!("cannot secure {}: {e}", dir.display()))
+}
+
+fn create_anew(dir: &Path, sd: &SecurityDescriptor, why: anyhow::Error) -> anyhow::Result<()> {
+    log::warn!("{why:#}; creating it anew");
+    std::fs::remove_dir_all(dir)
+        .map_err(|e| anyhow::anyhow!("cannot remove {}: {e}", dir.display()))?;
+    create_dir_with(dir, sd)
 }
 
 fn create_dir_with(dir: &Path, sd: &SecurityDescriptor) -> anyhow::Result<()> {
@@ -542,5 +607,45 @@ mod tests {
             check_admin_only(&tmp).is_err(),
             "a user temp folder is user-writable"
         );
+    }
+
+    #[test]
+    fn secure_dir_replaces_and_refuses() {
+        // The owner is the test user, so this runs without admin rights; the
+        // folder therefore never counts as admin-only.
+        let me = current_user_sid().unwrap();
+        let sddl = format!("O:{me}G:{me}D:P(A;OICI;FA;;;{me})");
+        let base = std::env::temp_dir().join(format!("ufsmount-secure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir(&base).unwrap();
+
+        let dir = base.join("dir");
+        secure_dir(&dir, &sddl).unwrap();
+        std::fs::write(dir.join("planted"), b"x").unwrap();
+        secure_dir(&dir, &sddl).unwrap();
+        assert!(dir.is_dir() && !dir.join("planted").exists());
+
+        let file = base.join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert!(secure_dir(&file, &sddl).is_err());
+
+        let target = base.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = base.join("link");
+        let made = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        assert!(secure_dir(&link, &sddl).is_err());
+        let e = check_admin_only(&link).unwrap_err();
+        assert!(e.to_string().contains("junction"), "{e}");
+
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

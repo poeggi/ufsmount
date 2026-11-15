@@ -136,7 +136,9 @@ fn cp_keeps_crafted_names_inside() {
 fn cp_stops_at_a_directory_loop() {
     let vol = with_dir3_entry(|img, entry, dir2| img[entry..entry + 4].copy_from_slice(&dir2));
     let (stats, out) = cp_dir1(&vol, "cp-loop");
-    assert_eq!(stats.failed, 1);
+    assert_eq!((stats.dirs, stats.failed), (2, 1));
+    assert!(out.join(r"dir1\dir2").is_dir());
+    assert!(!out.join(r"dir1\dir2\dir3").exists());
     remove_tree(&out);
 }
 
@@ -146,8 +148,13 @@ fn cp_skips_an_empty_name() {
         img[entry..entry + 4].copy_from_slice(&dir2);
         img[entry + 7] = 0;
     });
+    let dir2 = vol.lookup(&w(r"\dir1\dir2")).unwrap();
+    let table = vol.dir(dir2.inr).unwrap();
+    assert_eq!((table.entries.len(), table.hidden), (0, 1));
+
     let (stats, out) = cp_dir1(&vol, "cp-empty");
-    assert_eq!(stats.failed, 1);
+    assert_eq!((stats.dirs, stats.failed), (2, 1));
+    assert!(!out.join(r"dir1\dir2\dir3").exists());
     remove_tree(&out);
 }
 

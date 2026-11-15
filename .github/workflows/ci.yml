@@ -268,5 +268,11 @@ jobs:
           cd out
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+          setup="ufsmount-${GITHUB_REF_NAME#v}-setup.exe"
+          test -f "$setup"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          # Above the generated notes.
+          notes=$(printf '## Download\n\n- **[%s](%s/%s)**: the setup, with the tray app\n- [ufsmount.exe](%s/ufsmount.exe): the command line tool only\n' \
+            "$setup" "$url" "$setup" "$url")
           gh release create "$GITHUB_REF_NAME" * \
-            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes --notes "$notes"

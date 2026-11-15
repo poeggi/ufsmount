@@ -24,7 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HRESULT, HSTRING, PCWSTR, w};
 
 use super::sys::open_unelevated;
-use super::update::{self, LATEST_URL, Version};
+use super::update::{self, Version};
 use crate::winfs::winfsp_version;
 
 const SOURCE_URL: &str = "https://github.com/poeggi/winfsp-ufs";
@@ -38,7 +38,7 @@ type Outcome = Option<Result<Version, String>>;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mark {
     Spinner(usize),
-    Newer,
+    Newer(Version),
     Current,
     Failed,
 }
@@ -86,8 +86,13 @@ fn finished(outcome: Result<Version, String>) -> (Mark, String) {
             let (a, b, c) = latest;
             log::info!("update check: {a}.{b}.{c} is available");
             (
-                Mark::Newer,
-                format!("ufsmount {a}.{b}.{c} is available. <a href=\"{LATEST_URL}\">Download</a>"),
+                Mark::Newer(latest),
+                format!(
+                    "ufsmount {a}.{b}.{c} is available. <a href=\"{}\">Download the setup</a> \
+                     or see <a href=\"{}\">what's new</a>.",
+                    update::setup_url(latest),
+                    update::release_url(latest),
+                ),
             )
         }
         Ok(_) => (Mark::Current, "ufsmount is up to date.".to_string()),
@@ -212,7 +217,7 @@ impl About {
                 // SAFETY: lParam is the href of the link, valid during the call.
                 let href = unsafe { PCWSTR(lparam.0 as *const u16).to_string() };
                 if let Ok(href) = href
-                    && (href == SOURCE_URL || href == LATEST_URL)
+                    && self.is_our_link(&href)
                     && let Err(e) = open_unelevated(&href)
                 {
                     log::warn!("cannot open {href}: {e:#}");
@@ -220,6 +225,13 @@ impl About {
             }
             _ => {}
         }
+    }
+
+    /// Only the links this dialog shows are opened.
+    fn is_our_link(&self, href: &str) -> bool {
+        href == SOURCE_URL
+            || matches!(self.mark, Mark::Newer(v)
+                if href == update::setup_url(v) || href == update::release_url(v))
     }
 
     fn set_footer(&self, hwnd: HWND) {
@@ -285,7 +297,7 @@ fn sample(mark: Mark, p: (f32, f32)) -> Option<([f32; 3], f32)> {
             let lit = angle.rem_euclid(turn) < turn * 0.3;
             return Some((BLUE, if lit { 1.0 } else { 0.25 }));
         }
-        Mark::Newer => (
+        Mark::Newer(_) => (
             BLUE,
             &[
                 ((0.0, 0.22), (0.0, -0.2)),
@@ -391,10 +403,33 @@ mod tests {
     fn footers() {
         let (a, b, c) = update::current();
         assert_eq!(finished(Ok((a, b, c))).0, Mark::Current);
-        assert_eq!(finished(Ok((a, b, c + 1))).0, Mark::Newer);
-        assert_eq!(finished(Ok((a + 1, 0, 0))).0, Mark::Newer);
-        assert!(finished(Ok((a + 1, 0, 0))).1.contains(LATEST_URL));
+        assert_eq!(finished(Ok((a, b, c + 1))).0, Mark::Newer((a, b, c + 1)));
+        let newer = (a + 1, 0, 0);
+        let (mark, footer) = finished(Ok(newer));
+        assert_eq!(mark, Mark::Newer(newer));
+        assert!(footer.contains(&update::setup_url(newer)));
+        assert!(footer.contains(&update::release_url(newer)));
         assert_eq!(finished(Err("x".into())).0, Mark::Failed);
+    }
+
+    #[test]
+    fn only_shown_links_open() {
+        let mut about = About {
+            outcome: Arc::default(),
+            mark: Mark::Current,
+            footer: String::new(),
+            ticks: 0,
+            size: 16,
+            icon: HICON::default(),
+        };
+        let v = (9, 9, 9);
+        assert!(about.is_our_link(SOURCE_URL));
+        assert!(!about.is_our_link(&update::setup_url(v)));
+        about.mark = Mark::Newer(v);
+        assert!(about.is_our_link(&update::setup_url(v)));
+        assert!(about.is_our_link(&update::release_url(v)));
+        assert!(!about.is_our_link(&update::setup_url((9, 9, 8))));
+        assert!(!about.is_our_link("https://example.com/"));
     }
 
     #[test]
@@ -421,7 +456,7 @@ mod tests {
         for mark in [
             Mark::Spinner(0),
             Mark::Spinner(5),
-            Mark::Newer,
+            Mark::Newer((9, 9, 9)),
             Mark::Current,
             Mark::Failed,
         ] {

@@ -17,8 +17,8 @@ Raw disk reads and global drive letters need admin rights. The tray and the laun
   (`FOLDERID_ProgramFiles`), and every folder below Program Files and the exe are admin-only, no reparse points.
 - Admin-only checks count every allow ACE type (plain, object, callback) as granting.
 - About's update check: one HEAD request to github.com over WinHTTP, redirects not followed.
-  Only the version number in the redirect target is read. Its links open only our two fixed URLs,
-  unelevated like "Open".
+  Only the version number in the redirect target is read. A link opens only if the dialog shows it
+  (source; setup and release page of the newer version), unelevated like "Open".
 - `--source <image>` (tests) needs an elevated caller and is refused with `--from-task`.
 
 ## Scheduled task `ufsmount-tray`

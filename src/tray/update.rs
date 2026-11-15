@@ -12,9 +12,9 @@ use windows::Win32::Networking::WinHttp::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 /// Redirects to `TAG_URL` + the version of the latest release.
-pub const LATEST_URL: &str = "https://github.com/poeggi/winfsp-ufs/releases/latest";
 const LATEST_PATH: &str = "/poeggi/winfsp-ufs/releases/latest";
 const TAG_URL: &str = "https://github.com/poeggi/winfsp-ufs/releases/tag/v";
+const DOWNLOAD_URL: &str = "https://github.com/poeggi/winfsp-ufs/releases/download/v";
 const TIMEOUT_MS: i32 = 5_000;
 
 pub type Version = (u32, u32, u32);
@@ -31,6 +31,16 @@ pub fn parse_version(s: &str) -> Option<Version> {
 
 pub fn current() -> Version {
     parse_version(env!("CARGO_PKG_VERSION")).expect("the package version is x.y.z")
+}
+
+/// The release page of `v`.
+pub fn release_url((a, b, c): Version) -> String {
+    format!("{TAG_URL}{a}.{b}.{c}")
+}
+
+/// The setup of `v`, named as `OutputBaseFilename` in installer/ufsmount.iss.
+pub fn setup_url((a, b, c): Version) -> String {
+    format!("{DOWNLOAD_URL}{a}.{b}.{c}/ufsmount-{a}.{b}.{c}-setup.exe")
 }
 
 struct Handle(*mut c_void);
@@ -128,6 +138,23 @@ mod tests {
         }
         assert!((0, 10, 0) > (0, 9, 9), "numeric, not text order");
         assert_eq!(Some(current()), parse_version(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn links() {
+        assert_eq!(
+            release_url((0, 3, 1)),
+            "https://github.com/poeggi/winfsp-ufs/releases/tag/v0.3.1"
+        );
+        assert_eq!(
+            setup_url((0, 3, 1)),
+            "https://github.com/poeggi/winfsp-ufs/releases/download/v0.3.1/ufsmount-0.3.1-setup.exe"
+        );
+        let iss = include_str!("../../installer/ufsmount.iss");
+        assert!(
+            iss.contains("OutputBaseFilename=ufsmount-{#AppVersion}-setup\r\n")
+                || iss.contains("OutputBaseFilename=ufsmount-{#AppVersion}-setup\n")
+        );
     }
 
     /// Asks github.com; run with `--ignored`.

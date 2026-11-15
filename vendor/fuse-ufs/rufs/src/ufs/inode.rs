@@ -273,7 +273,7 @@ impl<R: Backend> Ufs<R> {
 				off:    offset % bs,
 				size:   bs,
 			}
-		} else if offset < (bs * blocks + fs * frags) {
+		} else if offset - bs * blocks < fs * frags {
 			BlockInfo {
 				blkidx: blocks,
 				off:    offset % bs,
@@ -438,5 +438,32 @@ impl<R: Backend> Ufs<R> {
 			"inode_get_block_size(blkidx={blkidx}) = {res}; frags={frags}, blocks={blocks}"
 		);
 		Ok(res)
+	}
+}
+
+#[cfg(test)]
+mod t {
+	use super::*;
+	use crate::ufs::testfs::*;
+
+	/// A file of nearly 2^64 bytes: its last block is found without an overflow,
+	/// and reading it fails instead of panicking.
+	#[test]
+	fn huge_file() {
+		let mut ino = Inode::new(InodeType::RegularFile, 0o644, 0, 0, 32768);
+		ino.size = u64::MAX;
+		let mut img = image(&superblock());
+		put_inode(&mut img, InodeNum::ROOT, &ino);
+		let mut ufs = open(img).unwrap();
+
+		let block = ufs
+			.inode_find_block(InodeNum::ROOT, &ino, u64::MAX - 1)
+			.unwrap();
+		assert_eq!(block.blkidx, u64::MAX / 32768);
+		assert_eq!(block.off, 32766);
+		assert_eq!(block.size, 32768);
+		assert!(ufs
+			.inode_read(InodeNum::ROOT, u64::MAX - 10, &mut [0u8; 4])
+			.is_err());
 	}
 }

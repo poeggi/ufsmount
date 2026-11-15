@@ -5,14 +5,14 @@
 
 use std::path::Path;
 
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY,
     REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ,
     RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyExW, RegGetValueW, RegOpenKeyExW,
     RegSetValueExW,
 };
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{PCWSTR, w};
 
 const ENV_KEY: PCWSTR = w!(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment");
 const OWN_KEY: PCWSTR = w!(r"SOFTWARE\ufsmount");
@@ -59,14 +59,24 @@ impl Drop for Key {
     }
 }
 
+/// The text of a registry string: trailing NULs are dropped. An embedded NUL
+/// or invalid UTF-16 is an error: written back, the value would be cut or
+/// changed.
+fn decode(units: &[u16]) -> anyhow::Result<String> {
+    let end = units.iter().rposition(|&c| c != 0).map_or(0, |i| i + 1);
+    let units = &units[..end];
+    anyhow::ensure!(!units.contains(&0), "the value holds a NUL character");
+    String::from_utf16(units).map_err(|_| anyhow::anyhow!("the value is not valid UTF-16"))
+}
+
 /// A string value with its type; None if it does not exist.
-fn read(root: HKEY, key: PCWSTR, name: PCWSTR) -> Option<(String, REG_VALUE_TYPE)> {
+fn read(root: HKEY, key: PCWSTR, name: PCWSTR) -> anyhow::Result<Option<(String, REG_VALUE_TYPE)>> {
     let mut kind = REG_VALUE_TYPE::default();
     let mut size = 0u32;
     let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
     // SAFETY: two-call pattern with a buffer of the reported size.
     unsafe {
-        if RegGetValueW(
+        let err = RegGetValueW(
             root,
             key,
             name,
@@ -74,13 +84,17 @@ fn read(root: HKEY, key: PCWSTR, name: PCWSTR) -> Option<(String, REG_VALUE_TYPE
             Some(&mut kind),
             None,
             Some(&mut size),
-        ) != ERROR_SUCCESS
-        {
-            return None;
+        );
+        if err == ERROR_FILE_NOT_FOUND {
+            return Ok(None);
         }
+        anyhow::ensure!(
+            err == ERROR_SUCCESS,
+            "cannot read the registry value: {err:?}"
+        );
         let mut buf = vec![0u16; (size as usize).div_ceil(2) + 1];
         size = (buf.len() * 2) as u32;
-        if RegGetValueW(
+        let err = RegGetValueW(
             root,
             key,
             name,
@@ -88,13 +102,26 @@ fn read(root: HKEY, key: PCWSTR, name: PCWSTR) -> Option<(String, REG_VALUE_TYPE
             Some(&mut kind),
             Some(buf.as_mut_ptr().cast()),
             Some(&mut size),
-        ) != ERROR_SUCCESS
-        {
-            return None;
-        }
-        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-        Some((String::from_utf16_lossy(&buf[..len]), kind))
+        );
+        anyhow::ensure!(
+            err == ERROR_SUCCESS,
+            "cannot read the registry value: {err:?}"
+        );
+        let len = (size as usize / 2).min(buf.len());
+        Ok(Some((decode(&buf[..len])?, kind)))
     }
+}
+
+/// The longest value of an environment variable, in UTF-16 units.
+const MAX_VALUE: usize = 32767;
+
+fn check_len(value: &str) -> anyhow::Result<()> {
+    let n = value.encode_utf16().count();
+    anyhow::ensure!(
+        n <= MAX_VALUE,
+        "the system PATH would be {n} characters long, more than {MAX_VALUE}; not changed"
+    );
+    Ok(())
 }
 
 fn write(key: PCWSTR, name: PCWSTR, value: &str, kind: REG_VALUE_TYPE) -> anyhow::Result<()> {
@@ -146,7 +173,19 @@ fn user_path_has(dir: &str) -> bool {
             return false;
         }
         let key = Key(key);
-        read(key.0, PCWSTR::null(), w!("Path")).is_some_and(|(p, _)| has_dir(&p, dir))
+        read(key.0, PCWSTR::null(), w!("Path"))
+            .ok()
+            .flatten()
+            .is_some_and(|(p, _)| has_dir(&p, dir))
+    }
+}
+
+/// Delete what `add` remembered.
+fn forget() {
+    // SAFETY: plain call.
+    let err = unsafe { RegDeleteKeyExW(HKEY_LOCAL_MACHINE, OWN_KEY, KEY_WOW64_64KEY.0, None) };
+    if err != ERROR_SUCCESS {
+        log::info!("SOFTWARE\\ufsmount: {err:?}");
     }
 }
 
@@ -155,46 +194,43 @@ fn user_path_has(dir: &str) -> bool {
 pub fn add(exe: &Path) -> anyhow::Result<()> {
     let dir = exe
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("no folder for {}", exe.display()))?
-        .to_string_lossy()
-        .into_owned();
+        .and_then(Path::to_str)
+        .ok_or_else(|| anyhow::anyhow!("no usable folder for {}", exe.display()))?;
     let (paths, kind) = read(HKEY_LOCAL_MACHINE, ENV_KEY, w!("Path"))
-        .ok_or_else(|| anyhow::anyhow!("cannot read the system PATH; not changed"))?;
-    if has_dir(&paths, &dir) || user_path_has(&dir) {
+        .and_then(|v| v.ok_or_else(|| anyhow::anyhow!("it does not exist")))
+        .map_err(|e| anyhow::anyhow!("cannot read the system PATH: {e:#}; not changed"))?;
+    if has_dir(&paths, dir) || user_path_has(dir) {
         log::info!("PATH has {dir} already");
         return Ok(());
     }
-    let added = suffix_for(&paths, &dir);
-    write(ENV_KEY, w!("Path"), &format!("{paths}{added}"), kind)?;
+    let added = suffix_for(&paths, dir);
+    let value = format!("{paths}{added}");
+    check_len(&value)?;
+    // The marker goes first: an entry without it could never be taken back.
     write(OWN_KEY, w!("PathAdded"), &added, REG_SZ)?;
+    if let Err(e) = write(ENV_KEY, w!("Path"), &value, kind) {
+        forget();
+        return Err(e);
+    }
     log::info!("added {dir} to the system PATH");
     Ok(())
 }
 
 /// Take back what `add` appended, keeping the value's type.
 pub fn remove(exe: &Path) -> anyhow::Result<()> {
-    let Some((added, _)) = read(HKEY_LOCAL_MACHINE, OWN_KEY, w!("PathAdded")) else {
+    let Some((added, _)) = read(HKEY_LOCAL_MACHINE, OWN_KEY, w!("PathAdded"))? else {
         return Ok(());
     };
     let dir = exe
         .parent()
         .map(|d| d.to_string_lossy().into_owned())
         .unwrap_or_default();
-    if let Some((paths, kind)) = read(HKEY_LOCAL_MACHINE, ENV_KEY, w!("Path")) {
+    if let Some((paths, kind)) = read(HKEY_LOCAL_MACHINE, ENV_KEY, w!("Path"))
+        .map_err(|e| anyhow::anyhow!("cannot read the system PATH: {e:#}; not changed"))?
+    {
         write(ENV_KEY, w!("Path"), &without(&paths, &dir, &added), kind)?;
     }
-    // SAFETY: plain call.
-    let err = unsafe {
-        RegDeleteKeyExW(
-            HKEY_LOCAL_MACHINE,
-            &HSTRING::from(r"SOFTWARE\ufsmount"),
-            KEY_WOW64_64KEY.0,
-            None,
-        )
-    };
-    if err != ERROR_SUCCESS {
-        log::info!("SOFTWARE\\ufsmount: {err:?}");
-    }
+    forget();
     log::info!("removed {dir} from the system PATH");
     Ok(())
 }
@@ -215,6 +251,29 @@ mod tests {
         }
         assert!(has_dir(r"C:\a;c:\program files\UFSMOUNT\;C:\b", DIR));
         assert!(!has_dir(r"C:\a;;C:\b", DIR));
+    }
+
+    #[test]
+    fn registry_strings() {
+        let u = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(decode(&[]).unwrap(), "");
+        assert_eq!(decode(&[0, 0]).unwrap(), "");
+        let mut v = u(r"C:\a;C:\b");
+        v.extend([0, 0]);
+        assert_eq!(decode(&v).unwrap(), r"C:\a;C:\b");
+        let mut v = u(r"C:\a");
+        v.push(0);
+        v.extend(u(r";C:\b"));
+        assert!(decode(&v).is_err(), "embedded NUL");
+        let mut v = u(r"C:\a");
+        v.push(0xd800);
+        assert!(decode(&v).is_err(), "unpaired surrogate");
+    }
+
+    #[test]
+    fn length_limit() {
+        assert!(check_len(&"a".repeat(MAX_VALUE)).is_ok());
+        assert!(check_len(&"a".repeat(MAX_VALUE + 1)).is_err());
     }
 
     #[test]

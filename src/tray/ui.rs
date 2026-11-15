@@ -25,17 +25,18 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CW_USEDEFAULT, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW,
-    DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_VOLUME,
-    DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HDR, DEVICE_NOTIFY_WINDOW_HANDLE,
-    DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW,
-    GetMessageW, HICON, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_GRAYED,
-    MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MSGFLT_ALLOW, PostMessageW,
-    PostQuitMessage, RegisterClassW, RegisterDeviceNotificationW, RegisterWindowMessageW,
-    SM_CXSMICON, SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_DEVICECHANGE,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_NULL, WM_QUERYENDSESSION, WM_TIMER,
-    WNDCLASSW, WS_OVERLAPPED,
+    AppendMenuW, BROADCAST_QUERY_DENY, CW_USEDEFAULT, ChangeWindowMessageFilterEx, CreatePopupMenu,
+    CreateWindowExW, DBT_DEVICEARRIVAL, DBT_DEVICEQUERYREMOVE, DBT_DEVICEREMOVECOMPLETE,
+    DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_HANDLE, DBT_DEVTYP_VOLUME,
+    DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR,
+    DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
+    DispatchMessageW, FindWindowW, GetMessageW, HICON, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR,
+    LoadImageW, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
+    MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterDeviceNotificationW,
+    RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetTimer, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU,
+    WM_DESTROY, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_NULL,
+    WM_QUERYENDSESSION, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -58,6 +59,8 @@ const ID_ABOUT: u32 = 11;
 const ID_QUIT: u32 = 12;
 const ID_SIGN_IN: u32 = 13;
 const ID_MOUNTS: u32 = 100;
+/// Longest wait for an unmount before an eject request is refused.
+const EJECT_WAIT: Duration = Duration::from_secs(10);
 
 enum Action {
     Open(String),
@@ -333,6 +336,24 @@ fn quit(wait: Duration) {
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 
+/// Unmount the disk with `handle` and close it, so Windows may remove it.
+/// True once done; Windows waits for the answer.
+fn eject(handle: usize) -> bool {
+    let Some(tx) = with_app(|a| a.tx.clone()) else {
+        return false;
+    };
+    let (done_tx, done_rx) = channel();
+    if tx.send(Cmd::Eject(handle, done_tx)).is_err() {
+        return false;
+    }
+    if done_rx.recv_timeout(EJECT_WAIT).is_ok() {
+        return true;
+    }
+    // Refused, but the queued eject still unmounts: mount the disk again after it.
+    let _ = tx.send(Cmd::Rescan { manual: false });
+    false
+}
+
 /// The menu at `x`, `y` (the icon's anchor). Not reentrant: one click can
 /// bring more than one notification.
 fn show_menu(x: i32, y: i32) {
@@ -482,6 +503,20 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_DEVICECHANGE => {
             let event = wparam.0 as u32;
+            if event == DBT_DEVICEQUERYREMOVE && lparam.0 != 0 {
+                // SAFETY: for this event lparam points to a DEV_BROADCAST_HDR.
+                let kind = unsafe { (*(lparam.0 as *const DEV_BROADCAST_HDR)).dbch_devicetype };
+                if kind == DBT_DEVTYP_HANDLE {
+                    // SAFETY: a handle event: lparam is a DEV_BROADCAST_HANDLE.
+                    let handle =
+                        unsafe { (*(lparam.0 as *const DEV_BROADCAST_HANDLE)).dbch_handle };
+                    return if eject(handle.0 as usize) {
+                        LRESULT(1)
+                    } else {
+                        LRESULT(BROADCAST_QUERY_DENY as isize)
+                    };
+                }
+            }
             if (event == DBT_DEVICEARRIVAL || event == DBT_DEVICEREMOVECOMPLETE) && lparam.0 != 0 {
                 // SAFETY: for these events lparam points to a DEV_BROADCAST_HDR.
                 let kind = unsafe { (*(lparam.0 as *const DEV_BROADCAST_HDR)).dbch_devicetype };
@@ -611,6 +646,7 @@ pub fn run(inst: Instance, source: Option<PathBuf>, sd: SecurityDescriptor) -> E
                 )
             };
         }),
+        window: hwnd_val,
     });
     let (tx, worker): (Sender<Cmd>, JoinHandle<()>) = worker::spawn(source, sd, shared.clone());
     APP.with(|a| {

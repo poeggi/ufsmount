@@ -3,6 +3,7 @@
 //! The UI thread only sends commands and shows snapshots.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
 use std::fs::OpenOptions;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
@@ -23,6 +24,10 @@ use windows::Win32::System::Ioctl::{
 };
 use windows::Win32::System::Registry::{
     HKEY, HKEY_USERS, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE, DEVICE_NOTIFY_WINDOW_HANDLE, HDEVNOTIFY,
+    RegisterDeviceNotificationW, UnregisterDeviceNotification,
 };
 use windows::core::{HSTRING, PWSTR};
 
@@ -57,6 +62,9 @@ pub enum Cmd {
     Gone(u64),
     /// Start the tray at sign-in, or not.
     SignIn(bool),
+    /// Windows asks to remove the disk with this handle: unmount and close
+    /// it; the sender is told when done.
+    Eject(usize, Sender<()>),
     /// Unmount everything and end; the sender is told when done.
     Quit(Sender<()>),
 }
@@ -85,6 +93,8 @@ pub struct Snapshot {
 pub struct Shared {
     pub snap: Mutex<Snapshot>,
     pub notify: Box<dyn Fn() + Send + Sync>,
+    /// The tray window (HWND), which gets the removal requests of mounted disks.
+    pub window: usize,
 }
 
 /// One file system, identified across scans by disk, offset and UFS id.
@@ -100,16 +110,51 @@ struct Active {
     dev: Arc<Device>,
     stop: Arc<AtomicBool>,
     watcher: Option<JoinHandle<()>>,
+    /// The registration for removal requests of the disk (HDEVNOTIFY), or 0.
+    removal: usize,
 }
 
 impl Active {
     fn stop(mut self) {
+        if self.removal != 0 {
+            // SAFETY: our registration, ended once.
+            let _ =
+                unsafe { UnregisterDeviceNotification(HDEVNOTIFY(self.removal as *mut c_void)) };
+        }
         self.stop.store(true, Ordering::Relaxed);
         self.mount.stop();
         if let Some(w) = self.watcher.take() {
             let _ = w.join();
         }
         log::info!("unmounted {} from {}", self.label, self.letter);
+    }
+}
+
+/// Ask for the removal requests of `dev` (Eject, Safely Remove) at the tray
+/// window: an open disk handle otherwise blocks them. The registration, or 0.
+fn watch_removal(window: usize, dev: &Device) -> usize {
+    let Some(handle) = dev.disk_handle() else {
+        return 0;
+    };
+    let filter = DEV_BROADCAST_HANDLE {
+        dbch_size: size_of::<DEV_BROADCAST_HANDLE>() as u32,
+        dbch_devicetype: DBT_DEVTYP_HANDLE.0,
+        dbch_handle: HANDLE(handle as *mut c_void),
+        ..Default::default()
+    };
+    // SAFETY: the filter lives through the call; Active::stop ends the registration.
+    match unsafe {
+        RegisterDeviceNotificationW(
+            HANDLE(window as *mut c_void),
+            (&raw const filter).cast::<c_void>(),
+            DEVICE_NOTIFY_WINDOW_HANDLE,
+        )
+    } {
+        Ok(h) => h.0 as usize,
+        Err(e) => {
+            log::warn!("{}: no removal requests: {e}", dev.name());
+            0
+        }
     }
 }
 
@@ -356,6 +401,7 @@ impl Worker {
                         dev: dev.clone(),
                         stop,
                         watcher: Some(watcher),
+                        removal: watch_removal(self.shared.window, dev),
                     });
                     return;
                 }
@@ -515,6 +561,19 @@ impl Worker {
                 }
             }
             Cmd::Gone(id) => self.gone(id),
+            Cmd::Eject(handle, done) => {
+                // A pending scan would open the disk again before Windows removes it.
+                *rescan_at = None;
+                let (eject, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.actives)
+                    .into_iter()
+                    .partition(|a| a.dev.disk_handle() == Some(handle));
+                self.actives = keep;
+                for a in eject {
+                    log::info!("{}: removal requested", a.dev.name());
+                    a.stop();
+                }
+                let _ = done.send(());
+            }
             Cmd::SignIn(on) => match task::install(on) {
                 Ok(()) => self.sign_in = task::starts_at_sign_in(),
                 Err(e) => self.note("Start at sign-in", format!("{e:#}"), true),
@@ -623,6 +682,7 @@ mod tests {
         let shared = Arc::new(Shared {
             snap: Mutex::new(Snapshot::default()),
             notify: Box::new(|| {}),
+            window: 0,
         });
         let sd = SecurityDescriptor::read_only_for("S-1-5-18").unwrap();
         Worker::new(channel().0, shared, sd, None)
@@ -646,6 +706,16 @@ mod tests {
         w.no_ufs.insert(999, false);
         assert!(w.handle(Cmd::Removed, &mut None).is_none());
         assert!(w.no_ufs.is_empty());
+    }
+
+    #[test]
+    fn eject_answers_without_a_mount() {
+        let mut w = worker();
+        let (done, answer) = channel();
+        let mut at = Some(Instant::now());
+        assert!(w.handle(Cmd::Eject(42, done), &mut at).is_none());
+        assert!(answer.try_recv().is_ok(), "Windows is told at once");
+        assert!(at.is_none(), "no scan while the disk goes");
     }
 
     #[test]

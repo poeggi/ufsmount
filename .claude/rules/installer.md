@@ -32,6 +32,10 @@
 - A disk arrival forgets which removable-media disks (card readers) held no UFS, so a swapped card is
   probed again. Fixed disks are not probed again: that would wake a sleeping disk.
 - A mount the user unmounted stays unmounted until the disk is plugged in again or "Rescan" is clicked.
+- Each mounted disk's handle is registered for removal requests (DBT_DEVTYP_HANDLE). On
+  DBT_DEVICEQUERYREMOVE (Eject) the tray unmounts every mount of that disk and closes it before it
+  answers, else the open handle blocks the eject. After 10 s it refuses and mounts the disk again.
+  If another program blocks the eject, "Rescan" mounts the disk again.
 - "Start at sign-in" is shown when `start-at-sign-in` can be read; a task changed by hand
   shows wrong until the next toggle or setup run.
 - About is a TaskDialog (Common Controls 6 via the manifest; comctl32.dll is delay-loaded, so

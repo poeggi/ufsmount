@@ -40,6 +40,7 @@ Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
 - The user who ran the setup gets no UAC prompt. Other accounts get one.
 - Every UFS2 file system is mounted: U: first, then T:, S: and so on.
 - Plugging in a disk mounts it. Unplugging unmounts it.
+- "Eject" (Safely Remove Hardware) works on a mounted disk: it is unmounted first.
 - Right-click the icon: Open or Unmount a drive, Rescan disks, Quit (unmounts all).
 - "Start at sign-in" in that menu starts it at every sign-in. The setup has the same choice.
 - About shows the versions and asks GitHub once whether a newer release exists. Nothing is downloaded.

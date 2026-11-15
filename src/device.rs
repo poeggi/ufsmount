@@ -100,6 +100,11 @@ pub trait RawDisk: Send + Sync {
     fn is_alive(&self) -> bool {
         true
     }
+
+    /// The OS handle of a disk, for removal requests.
+    fn handle(&self) -> Option<usize> {
+        None
+    }
 }
 
 struct OsDisk {
@@ -122,6 +127,10 @@ impl RawDisk for OsDisk {
 
     fn is_alive(&self) -> bool {
         !self.is_disk || disk_geometry(&self.file).is_ok()
+    }
+
+    fn handle(&self) -> Option<usize> {
+        self.is_disk.then(|| self.file.as_raw_handle() as usize)
     }
 }
 
@@ -316,6 +325,11 @@ impl Device {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The OS handle of a physical disk; None for an image.
+    pub fn disk_handle(&self) -> Option<usize> {
+        self.raw.handle()
     }
 
     pub fn len(&self) -> u64 {

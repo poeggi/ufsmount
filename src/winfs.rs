@@ -301,8 +301,8 @@ impl FileSystemContext for UfsFs {
 
     fn get_volume_info(&self, out_volume_info: &mut VolumeInfo) -> winfsp::Result<()> {
         let fsize = u64::from(self.vol.info.fsize);
-        out_volume_info.total_size = self.vol.info.blocks * fsize;
-        out_volume_info.free_size = self.vol.info.bfree * fsize;
+        out_volume_info.total_size = self.vol.info.blocks.saturating_mul(fsize);
+        out_volume_info.free_size = self.vol.info.bfree.saturating_mul(fsize);
         out_volume_info.set_volume_label(&self.label);
         Ok(())
     }
@@ -448,6 +448,15 @@ impl FileSystemContext for UfsFs {
     ) -> winfsp::Result<()> {
         write_protected()
     }
+
+    fn set_extended_attributes(
+        &self,
+        _context: &Ctx,
+        _buffer: &[u8],
+        _file_info: &mut FileInfo,
+    ) -> winfsp::Result<()> {
+        write_protected()
+    }
 }
 
 /// Look up DLLs only in System32 and in explicitly given directories.
@@ -542,17 +551,21 @@ fn load_winfsp_once() -> anyhow::Result<FspInit> {
     winfsp::winfsp_init().map_err(|e| anyhow::anyhow!("WinFsp init failed: {e:?}"))
 }
 
+/// 4096-byte sectors per allocation unit for a UFS fragment size: a power of two in 1..=32768.
+fn sectors_per_allocation_unit(fsize: u32) -> u16 {
+    1 << (fsize / 4096).clamp(1, 1 << 15).ilog2()
+}
+
 /// Build the file system host. `prefix` is the UNC volume prefix in launcher mode.
 pub fn build_host(
     vol: Arc<Volume>,
     sd: SecurityDescriptor,
     prefix: Option<&str>,
 ) -> winfsp::Result<FileSystemHost<UfsFs>> {
-    let fsize = vol.info.fsize;
     let id = vol.info.id;
     let mut vp = VolumeParams::new();
     vp.sector_size(4096)
-        .sectors_per_allocation_unit((fsize / 4096).max(1) as u16)
+        .sectors_per_allocation_unit(sectors_per_allocation_unit(vol.info.fsize))
         .max_component_length(255)
         .volume_serial_number(id[0] ^ id[1])
         .file_info_timeout(60_000)
@@ -797,6 +810,24 @@ mod tests {
             ),
             MIN_WINFSP
         );
+    }
+
+    #[test]
+    fn allocation_unit_from_fragment_size() {
+        let cases = [
+            (0, 1),
+            (512, 1),
+            (4096, 1),
+            (8192, 2),
+            (12288, 2),
+            (65536, 16),
+            (1 << 27, 32768),
+            (1 << 28, 32768),
+            (u32::MAX, 32768),
+        ];
+        for (fsize, sectors) in cases {
+            assert_eq!(sectors_per_allocation_unit(fsize), sectors, "fsize {fsize}");
+        }
     }
 
     #[test]

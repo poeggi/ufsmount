@@ -34,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - rufs: corrupt directory records and directories with holes give `EIO` instead of panicking or looping; a read-only listing skips the rest of a corrupt chunk
 - rufs: entries with `DT_UNKNOWN` or an undefined d_type take their type from the inode instead of panicking
 - rufs: a superblock with a negative `fs_fpg` gives `EIO` instead of panicking in the summary log
+- rufs: reject superblocks whose inode blocks do not fit in a cylinder group, as FreeBSD does
 
 ## [0.6.0] - 2025-09-27
 

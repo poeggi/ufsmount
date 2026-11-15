@@ -199,6 +199,12 @@ impl<R: Backend> Ufs<R> {
 		sbassert!(Some(sb.frag) == 1i32.checked_shl(sb.fragshift as u32));
 		sbassert!(sb.bmask == !(sb.bsize - 1));
 		sbassert!(sb.fmask == !(sb.fsize - 1));
+		// The inode blocks of a cylinder group fit inside it, and its data follows them.
+		sbassert!(sb.inopb == sb.bsize as u32 / UFS_INOSZ as u32);
+		sbassert!(sb.ipg.is_multiple_of(sb.inopb));
+		let inode_frags = (sb.ipg / (sb.inopb >> sb.fragshift)) as i64;
+		sbassert!(sb.iblkno as i64 + inode_frags <= sb.fpg as i64);
+		sbassert!(sb.dblkno as i64 == sb.iblkno as i64 + inode_frags);
 		// sizeof(struct fs) to SBLOCKSIZE, as FreeBSD checks. newfs rounds it up to
 		// a fragment, so it is 1536 for 512-byte fragments, not fsize.
 		sbassert!(sb.sbsize >= 1376 && sb.sbsize <= 8192);
@@ -360,5 +366,24 @@ mod t {
 		let mut sb = superblock();
 		sb.fpg = -1;
 		assert_eq!(open_errno(&sb), Some(libc::EIO));
+	}
+
+	/// The inode blocks of a cylinder group must fit inside it.
+	#[test]
+	fn inode_area() {
+		let cases: [fn(&mut Superblock); 4] = [
+			|sb| sb.inopb = 64,
+			|sb| sb.ipg = 200,
+			|sb| sb.dblkno = 48,
+			|sb| {
+				sb.ipg = 4096;
+				sb.dblkno = 40 + 256;
+			},
+		];
+		for (i, f) in cases.into_iter().enumerate() {
+			let mut sb = superblock();
+			f(&mut sb);
+			assert_eq!(open_errno(&sb), Some(libc::EIO), "case {i}");
+		}
 	}
 }

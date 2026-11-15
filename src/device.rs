@@ -245,7 +245,8 @@ pub struct Device {
     cache: Mutex<Cache>,
     /// Sectors that failed with a media error, and the error code.
     bad_sectors: Mutex<HashMap<u64, u32>>,
-    /// Chunks that hold a bad sector: read sector by sector.
+    /// Chunks whose read failed on a present disk: read sector by sector.
+    /// Any error counts, as some USB bridges report a bad sector as ERROR_IO_DEVICE.
     bad_chunks: Mutex<HashSet<u64>>,
     gone: AtomicBool,
     last_error: Mutex<Option<DeviceError>>,
@@ -429,9 +430,7 @@ impl Device {
                     "{}: chunk at byte {start} failed ({err}), reading sector by sector",
                     self.name
                 );
-                if err.is_media_error() {
-                    lock(&self.bad_chunks).insert(idx);
-                }
+                lock(&self.bad_chunks).insert(idx);
                 Ok(None)
             }
         }
@@ -720,33 +719,30 @@ mod tests {
     }
 
     #[test]
-    fn transient_errors_are_not_remembered() {
-        let data = pattern(2 * CHUNK as usize);
-        let mut disk = FakeDisk::new(data.clone(), 512);
-        disk.bad.push((0..512, 121)); // ERROR_SEM_TIMEOUT
-        let dev = disk.into_device();
-        let mut buf = vec![0; 10];
-        assert!(dev.read(0, &mut buf).is_err());
-        assert!(!dev.is_gone());
-        assert!(lock(&dev.bad_sectors).is_empty());
-        assert!(lock(&dev.bad_chunks).is_empty());
-    }
+    fn other_errors_mark_only_the_chunk() {
+        // ERROR_SEM_TIMEOUT, and ERROR_IO_DEVICE: a reset, or a bad sector behind a USB bridge.
+        for code in [121, ERROR_IO_DEVICE] {
+            let data = pattern(2 * CHUNK as usize);
+            let mut disk = FakeDisk::new(data.clone(), 512);
+            disk.bad.push((0..512, code));
+            let reads = disk.reads.clone();
+            let dev = disk.into_device();
+            let mut buf = vec![0; 10];
+            let err = dev.read(0, &mut buf).unwrap_err();
+            assert_eq!(device_error(&err).unwrap().code, code);
+            assert!(!dev.is_gone());
+            assert!(lock(&dev.bad_sectors).is_empty(), "code {code}");
+            assert_eq!(*lock(&dev.bad_chunks), HashSet::from([0]), "code {code}");
 
-    #[test]
-    fn io_device_error_is_not_remembered() {
-        let mut disk = FakeDisk::new(pattern(2 * CHUNK as usize), 512);
-        disk.bad.push((0..512, ERROR_IO_DEVICE));
-        let reads = disk.reads.clone();
-        let dev = disk.into_device();
-        let mut buf = vec![0; 10];
-        let err = dev.read(0, &mut buf).unwrap_err();
-        assert!(!device_error(&err).unwrap().is_media_error());
-        assert!(!dev.is_gone());
-        assert!(lock(&dev.bad_sectors).is_empty());
-        assert!(lock(&dev.bad_chunks).is_empty());
-        let before = reads.load(Ordering::Relaxed);
-        assert!(dev.read(0, &mut buf).is_err());
-        assert!(reads.load(Ordering::Relaxed) > before, "read again");
+            // The sector is read again, the whole chunk is not.
+            let before = reads.load(Ordering::Relaxed);
+            assert!(dev.read(0, &mut buf).is_err());
+            assert_eq!(reads.load(Ordering::Relaxed), before + 1, "code {code}");
+
+            let mut buf = vec![0; 1024];
+            dev.read(512, &mut buf).unwrap();
+            assert_eq!(buf, data[512..1536]);
+        }
     }
 
     #[test]

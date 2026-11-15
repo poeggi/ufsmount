@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - rufs: entries with `DT_UNKNOWN` or an undefined d_type take their type from the inode instead of panicking
 - rufs: a superblock with a negative `fs_fpg` gives `EIO` instead of panicking in the summary log
 - rufs: reject superblocks whose inode blocks do not fit in a cylinder group, as FreeBSD does
+- rufs: the superblock layout no longer depends on the pointer size, so 32-bit targets read it correctly
 
 ## [0.6.0] - 2025-09-27
 

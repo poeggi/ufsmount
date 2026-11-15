@@ -167,6 +167,30 @@ struct Worker {
 }
 
 impl Worker {
+    fn new(
+        tx: Sender<Cmd>,
+        shared: Arc<Shared>,
+        sd: SecurityDescriptor,
+        source: Option<PathBuf>,
+    ) -> Worker {
+        Worker {
+            tx,
+            shared,
+            sd,
+            source,
+            actives: Vec::new(),
+            next_id: 1,
+            unmounted: HashSet::new(),
+            no_ufs: HashSet::new(),
+            notes: Vec::new(),
+            status: String::new(),
+            last_warning: None,
+            cap_warned: false,
+            retry: false,
+            retries_left: RETRIES,
+        }
+    }
+
     fn note(&mut self, title: &str, text: String, warn: bool) {
         if warn {
             log::warn!("{title}: {text}");
@@ -341,11 +365,10 @@ impl Worker {
         }
     }
 
-    /// After a disk went away: forget what was noted about disk numbers that are
-    /// gone, so the disk is probed (and mounted) again when it comes back.
+    /// After a disk went away: forget user unmounts on disk numbers that are
+    /// gone, so the disk is mounted again when it comes back.
     fn forget_gone_disks(&mut self) {
         let present = |n: u32| Device::open(&Source::PhysicalDrive(n), None).is_ok();
-        self.no_ufs.retain(|&n| present(n));
         self.unmounted.retain(|k| k.0 == u32::MAX || present(k.0));
     }
 
@@ -391,8 +414,55 @@ impl Worker {
         }
     }
 
+    /// Run `f`. The panic hook logs a panic; here it becomes a note and the
+    /// worker goes on.
+    fn guard(&mut self, f: impl FnOnce(&mut Worker)) {
+        if catch_unwind(AssertUnwindSafe(|| f(self))).is_err() {
+            self.note("Internal error", "Details are in tray.log.".into(), true);
+        }
+    }
+
+    /// Handle one command. Returns the sender of `Cmd::Quit`.
+    fn handle(&mut self, cmd: Cmd, rescan_at: &mut Option<Instant>) -> Option<Sender<()>> {
+        match cmd {
+            Cmd::Rescan { manual } => {
+                if manual {
+                    self.unmounted.clear();
+                    self.no_ufs.clear();
+                    self.last_warning = None;
+                    self.cap_warned = false;
+                    self.retries_left = RETRIES;
+                }
+                let before = self.actives.len();
+                self.scan(manual);
+                if manual && self.actives.len() == before && self.notes.is_empty() {
+                    self.note("ufsmount", "No new UFS file system found.".into(), false);
+                }
+            }
+            Cmd::Arrived => {
+                // A card reader keeps its disk number when the card is swapped.
+                self.no_ufs.clear();
+                self.retries_left = RETRIES;
+                *rescan_at = Some(Instant::now() + DEBOUNCE);
+            }
+            Cmd::Removed => {
+                self.check_alive();
+                self.forget_gone_disks();
+            }
+            Cmd::Unmount(id) => {
+                if let Some(a) = self.take(id) {
+                    self.unmounted.insert(a.key);
+                    a.stop();
+                }
+            }
+            Cmd::Gone(id) => self.gone(id),
+            Cmd::Quit(done) => return Some(done),
+        }
+        None
+    }
+
     fn run(mut self, rx: Receiver<Cmd>) {
-        self.scan(false);
+        self.guard(|w| w.scan(false));
         if self.actives.is_empty() && self.notes.is_empty() {
             self.note(
                 "ufsmount",
@@ -424,43 +494,14 @@ impl Worker {
                     Err(_) => return,
                 },
             };
-            match cmd {
-                Cmd::Rescan { manual } => {
-                    if manual {
-                        self.unmounted.clear();
-                        self.no_ufs.clear();
-                        self.last_warning = None;
-                        self.cap_warned = false;
-                        self.retries_left = RETRIES;
-                    }
-                    let before = self.actives.len();
-                    self.scan(manual);
-                    if manual && self.actives.len() == before && self.notes.is_empty() {
-                        self.note("ufsmount", "No new UFS file system found.".into(), false);
-                    }
+            let mut quit = None;
+            self.guard(|w| quit = w.handle(cmd, &mut rescan_at));
+            if let Some(done) = quit {
+                for a in std::mem::take(&mut self.actives) {
+                    let _ = catch_unwind(AssertUnwindSafe(|| a.stop()));
                 }
-                Cmd::Arrived => {
-                    self.retries_left = RETRIES;
-                    rescan_at = Some(Instant::now() + DEBOUNCE);
-                }
-                Cmd::Removed => {
-                    self.check_alive();
-                    self.forget_gone_disks();
-                }
-                Cmd::Unmount(id) => {
-                    if let Some(a) = self.take(id) {
-                        self.unmounted.insert(a.key);
-                        a.stop();
-                    }
-                }
-                Cmd::Gone(id) => self.gone(id),
-                Cmd::Quit(done) => {
-                    for a in std::mem::take(&mut self.actives) {
-                        a.stop();
-                    }
-                    let _ = done.send(());
-                    return;
-                }
+                let _ = done.send(());
+                return;
             }
             self.update_status();
             self.publish();
@@ -502,31 +543,53 @@ pub fn spawn(
     let (tx, rx) = channel();
     let own_tx = tx.clone();
     // The worker owns the mounts; it is built on its own thread and never leaves it.
-    let handle = std::thread::spawn(move || {
-        Worker {
-            tx: own_tx,
-            shared,
-            sd,
-            source,
-            actives: Vec::new(),
-            next_id: 1,
-            unmounted: HashSet::new(),
-            no_ufs: HashSet::new(),
-            notes: Vec::new(),
-            status: String::new(),
-            last_warning: None,
-            cap_warned: false,
-            retry: false,
-            retries_left: RETRIES,
-        }
-        .run(rx)
-    });
+    let handle = std::thread::spawn(move || Worker::new(own_tx, shared, sd, source).run(rx));
     (tx, handle)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::letter_order;
+    use super::*;
+
+    fn worker() -> Worker {
+        let shared = Arc::new(Shared {
+            snap: Mutex::new(Snapshot::default()),
+            notify: Box::new(|| {}),
+        });
+        let sd = SecurityDescriptor::read_only_for("S-1-5-18").unwrap();
+        Worker::new(channel().0, shared, sd, None)
+    }
+
+    #[test]
+    fn arrival_forgets_disks_without_ufs() {
+        let mut w = worker();
+        w.no_ufs.insert(3);
+        let mut at = None;
+        assert!(w.handle(Cmd::Arrived, &mut at).is_none());
+        assert!(w.no_ufs.is_empty());
+        assert!(at.is_some());
+    }
+
+    #[test]
+    fn panic_becomes_a_note() {
+        let mut w = worker();
+        w.guard(|_| panic!("test panic"));
+        assert_eq!(w.notes.len(), 1);
+        assert!(w.notes[0].2);
+        let mut ran = false;
+        w.guard(|_| ran = true);
+        assert!(ran);
+        assert_eq!(w.notes.len(), 1);
+    }
+
+    #[test]
+    fn quit_returns_its_sender() {
+        let mut w = worker();
+        let (done, done_rx) = channel();
+        let quit = w.handle(Cmd::Quit(done), &mut None).unwrap();
+        quit.send(()).unwrap();
+        assert!(done_rx.try_recv().is_ok());
+    }
 
     #[test]
     fn letters() {

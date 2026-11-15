@@ -127,16 +127,8 @@ begin
       ((Minor = {#WinFspMinMinor}) and (Build >= {#WinFspMinBuild}))));
 end;
 
-{ The MSI is checked and run from here: Setup's own temporary folder, which is
-  protected when Setup runs elevated. The folder of the setup exe may be
-  writable by others. }
-function TmpMsi: String;
-begin
-  Result := ExpandConstant('{tmp}\{#WinFspMsi}');
-end;
-
-{ Copy the WinFsp MSI next to the setup exe, if it is the expected one. }
-function CopyLocalMsi: Boolean;
+{ Copy the WinFsp MSI next to the setup exe to Msi, if it is the expected one. }
+function CopyLocalMsi(const Msi: String): Boolean;
 var
   Src: String;
 begin
@@ -144,27 +136,33 @@ begin
   Src := ExpandConstant('{src}\{#WinFspMsi}');
   if not FileExists(Src) then
     exit;
-  if not CopyFile(Src, TmpMsi, False) then begin
+  if not CopyFile(Src, Msi, False) then begin
     Log('WinFsp: cannot copy ' + Src);
     exit;
   end;
   try
-    Result := GetSHA256OfFile(TmpMsi) = '{#WinFspSha256}';
+    Result := GetSHA256OfFile(Msi) = '{#WinFspSha256}';
   except
     Result := False;
   end;
   if Result then
     Log('WinFsp: using ' + Src)
   else
-    DeleteFile(TmpMsi);
+    Log('WinFsp: not the expected MSI: ' + Src);
 end;
 
-{ Put the WinFsp MSI into the temporary folder. Returns an error text, or ''. }
-function GetWinFspMsi: String;
+{ Put the WinFsp MSI into Setup's own temporary folder, which is protected
+  when Setup runs elevated; the folder of the setup exe may be writable by
+  others. Msi is the checked file. Returns an error text, or ''.
+  CopyFile keeps a read-only attribute, so the local copy has its own name
+  and cannot block the download. }
+function GetWinFspMsi(var Msi: String): String;
 begin
   Result := '';
-  if CopyLocalMsi then
+  Msi := ExpandConstant('{tmp}\local-{#WinFspMsi}');
+  if CopyLocalMsi(Msi) then
     exit;
+  Msi := ExpandConstant('{tmp}\{#WinFspMsi}');
   try
     DownloadTemporaryFile('{#WinFspUrl}', '{#WinFspMsi}', '{#WinFspSha256}', nil);
   except
@@ -176,7 +174,7 @@ end;
 
 { Run the MSI from GetWinFspMsi. Returns an error text, or ''.
   A restart request of the MSI (3010) is passed on through NeedRestart. }
-function InstallWinFsp: String;
+function InstallWinFsp(const Msi: String): String;
 var
   MsiLog, UI: String;
   Code: Integer;
@@ -190,7 +188,7 @@ begin
     MsiLog := MsiLog + '.winfsp.txt';
   if WizardSilent then UI := '/qn' else UI := '/passive';
   if not Exec(ExpandConstant('{sys}\msiexec.exe'),
-    Format('/i "%s" /norestart %s /l*v "%s"', [TmpMsi, UI, MsiLog]),
+    Format('/i "%s" /norestart %s /l*v "%s"', [Msi, UI, MsiLog]),
     '', SW_SHOW, ewWaitUntilTerminated, Code) then
     Code := -1;
   Log(Format('WinFsp setup: exit code %d, log %s', [Code, MsiLog]));
@@ -224,6 +222,16 @@ begin
   Result := False;
   for I := 1 to ParamCount do
     if CompareText(ParamStr(I), Name) = 0 then
+      Result := True;
+end;
+
+function HasParamPrefix(const Prefix: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(Copy(ParamStr(I), 1, Length(Prefix)), Prefix) = 0 then
       Result := True;
 end;
 
@@ -267,10 +275,12 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  { Keep an existing launcher registration selected. }
+  { Keep an existing launcher registration selected, unless the command line
+    sets the tasks. This runs in silent installs too. }
   if (CurPageID = wpSelectTasks) and not LauncherChecked then begin
     LauncherChecked := True;
-    if RegKeyExists(HKLM32, '{#LauncherKey}') then
+    if RegKeyExists(HKLM32, '{#LauncherKey}') and not HasParamPrefix('/TASKS=') and
+      not HasParamPrefix('/MERGETASKS=') then
       WizardSelectTasks('launcher');
   end;
 end;
@@ -280,17 +290,18 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   NeedWinFsp: Boolean;
+  Msi: String;
 begin
   Result := '';
   NeedWinFsp := not WinFspOk;
   if NeedWinFsp then begin
-    Result := GetWinFspMsi;
+    Result := GetWinFspMsi(Msi);
     if Result <> '' then
       exit;
   end;
   StopRunning;
   if NeedWinFsp then
-    Result := InstallWinFsp;
+    Result := InstallWinFsp(Msi);
 end;
 
 function NeedRestart: Boolean;

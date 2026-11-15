@@ -36,6 +36,20 @@ pub fn utc(secs: u64) -> String {
     )
 }
 
+/// One log line. Control characters in the message other than tab are
+/// escaped, so a message cannot fake lines of its own.
+fn line(secs: u64, level: log::Level, target: &str, msg: &str) -> String {
+    let mut text = String::with_capacity(msg.len());
+    for c in msg.chars() {
+        if c.is_control() && c != '\t' {
+            text.extend(c.escape_default());
+        } else {
+            text.push(c);
+        }
+    }
+    format!("{} {level:<5} {target}: {text}\r\n", utc(secs))
+}
+
 impl FileLog {
     fn open(&self) -> Option<File> {
         OpenOptions::new()
@@ -64,12 +78,11 @@ impl log::Log for FileLog {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        let line = format!(
-            "{} {:<5} {}: {}\r\n",
-            utc(secs),
+        let line = line(
+            secs,
             record.level(),
             record.target(),
-            record.args()
+            &record.args().to_string(),
         );
         let mut guard = self.file.lock().unwrap_or_else(|e| e.into_inner());
         if guard
@@ -78,7 +91,13 @@ impl log::Log for FileLog {
             .is_some_and(|m| m.len() > MAX_LEN)
         {
             *guard = None;
-            let _ = std::fs::rename(&self.path, self.path.with_extension("log.1"));
+            if std::fs::rename(&self.path, self.path.with_extension("log.1")).is_err() {
+                // A viewer holds the file: start it over in place.
+                let _ = OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&self.path);
+            }
         }
         if guard.is_none() {
             *guard = self.open();
@@ -105,7 +124,74 @@ pub fn init(dir: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::utc;
+    use super::*;
+    use log::Log;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ufsmount-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn log_two_lines(path: &Path) {
+        let logger = FileLog {
+            path: path.to_path_buf(),
+            file: Mutex::new(None),
+        };
+        for text in ["one", "two"] {
+            logger.log(
+                &log::Record::builder()
+                    .args(format_args!("{text}"))
+                    .level(log::Level::Info)
+                    .target("test")
+                    .build(),
+            );
+        }
+    }
+
+    #[test]
+    fn control_characters_are_escaped() {
+        assert_eq!(
+            line(0, log::Level::Warn, "t", "a\r\nb\tc"),
+            "1970-01-01T00:00:00Z WARN  t: a\\r\\nb\tc\r\n"
+        );
+    }
+
+    #[test]
+    fn rotation() {
+        let dir = temp_dir("log-rotation");
+        let path = dir.join("tray.log");
+        std::fs::write(&path, vec![b'x'; MAX_LEN as usize + 1]).unwrap();
+        log_two_lines(&path);
+        assert!(std::fs::metadata(&path).unwrap().len() < 100);
+        assert!(
+            std::fs::metadata(path.with_extension("log.1"))
+                .unwrap()
+                .len()
+                > MAX_LEN
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotation_with_the_file_held_open() {
+        let dir = temp_dir("log-held");
+        let path = dir.join("tray.log");
+        std::fs::write(&path, vec![b'x'; MAX_LEN as usize + 1]).unwrap();
+        // FILE_SHARE_READ | FILE_SHARE_WRITE, no delete: rename fails.
+        let viewer = OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        log_two_lines(&path);
+        drop(viewer);
+        assert!(std::fs::metadata(&path).unwrap().len() < 100);
+        assert!(!path.with_extension("log.1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn utc_dates() {

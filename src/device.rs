@@ -294,7 +294,9 @@ impl Device {
     }
 
     /// Build a device on any [`RawDisk`], for example a test double.
+    /// Panics unless `sector` is a power of two from 512 to 4096.
     pub fn from_raw(raw: Box<dyn RawDisk>, name: String, len: u64, sector: u64) -> Device {
+        assert!(supported_sector(sector), "unsupported sector size {sector}");
         Device {
             raw,
             name,
@@ -743,6 +745,12 @@ mod tests {
             dev.read(512, &mut buf).unwrap();
             assert_eq!(buf, data[512..1536]);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported sector size 520")]
+    fn odd_sector_size_is_refused() {
+        FakeDisk::new(pattern(4096), 520).into_device();
     }
 
     #[test]

@@ -2,8 +2,9 @@
 //! UFS file names (any bytes except `/` and NUL) as Windows names (UTF-16).
 //!
 //! - Valid UTF-8 is kept.
-//! - Characters Windows forbids in names (`"*:<>?\|` and 0x01-0x1F) map to
+//! - Characters Windows forbids in names (`"*/:<>?\|` and 0x00-0x1F) map to
 //!   U+F000 + char, as Cygwin does. So does a trailing space or dot.
+//!   `/` and NUL occur only on a damaged disk.
 //! - Bytes that are not valid UTF-8 map to U+F100 + byte, or with
 //!   [`Charset::Latin1`] to the Latin-1 character.
 //!
@@ -17,7 +18,7 @@ pub enum Charset {
     Latin1,
 }
 
-const FORBIDDEN: &[u8] = b"\"*:<>?\\|";
+const FORBIDDEN: &[u8] = b"\"*/:<>?\\|";
 
 fn forbidden(c: char) -> bool {
     (c as u32) < 0x20 || (c.is_ascii() && FORBIDDEN.contains(&(c as u8)))
@@ -104,6 +105,11 @@ mod tests {
             to_windows(b"tab\there", Charset::Utf8),
             w("tab\u{f009}here")
         );
+        assert_eq!(
+            to_windows(b"../../x", Charset::Utf8),
+            w("..\u{f02f}..\u{f02f}x")
+        );
+        assert_eq!(to_windows(b"/a\0", Charset::Utf8), w("\u{f02f}a\u{f000}"));
     }
 
     #[test]

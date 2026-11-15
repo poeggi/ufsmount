@@ -14,6 +14,10 @@ use crate::partition::{Candidate, describe_flags};
 
 /// Directory entries kept in the cache, over all directories.
 const DIR_CACHE_ENTRIES: usize = 200_000;
+/// Entries and name bytes read from one directory at most. Real directories
+/// stay far below; a damaged one could claim more than memory holds.
+const DIR_MAX_ENTRIES: usize = 4_000_000;
+const DIR_MAX_NAME_BYTES: usize = 256 << 20;
 /// Symlinks followed while resolving one path, in total (MAXSYMLINKS on FreeBSD).
 const MAX_LINKS: u32 = 32;
 
@@ -72,7 +76,7 @@ pub struct Entry {
 pub struct DirTable {
     pub entries: Vec<Entry>,
     pub parent: InodeNum,
-    /// Entries left out because their Windows name clashes with another one.
+    /// Entries left out: an empty name, or a Windows name that clashes with another one.
     pub hidden: usize,
     exact: HashMap<Vec<u16>, usize>,
     folded: HashMap<String, (usize, u32)>,
@@ -106,6 +110,11 @@ impl DirTable {
                 InodeType::RegularFile | InodeType::Directory | InodeType::Symlink
             ) {
                 log::debug!("dir {dir}: hiding {kind:?} \"{}\"", names::display(&raw));
+                continue;
+            }
+            if raw.is_empty() {
+                log::warn!("dir {dir}: an entry for inode {inr} has an empty name, hidden");
+                table.hidden += 1;
                 continue;
             }
             let name = names::to_windows(&raw, charset);
@@ -262,11 +271,25 @@ impl Volume {
         }
         let items = self.with_ufs(|ufs| {
             let mut items = Vec::new();
-            ufs.dir_iter_bytes(inr, |name, inr, kind| {
+            let mut name_bytes = 0;
+            let too_big = ufs.dir_iter_bytes(inr, |name, inr, kind| {
+                name_bytes += name.len();
+                if items.len() == DIR_MAX_ENTRIES || name_bytes > DIR_MAX_NAME_BYTES {
+                    return Some(());
+                }
                 items.push((name.to_vec(), inr, kind));
-                None::<()>
+                None
             })?;
-            Ok(items)
+            Ok(too_big.is_none().then_some(items))
+        })?
+        .ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "directory {inr} holds more than {DIR_MAX_ENTRIES} entries or {} MiB of names",
+                    DIR_MAX_NAME_BYTES >> 20
+                ),
+            ))
         })?;
         let table = Arc::new(DirTable::build(inr, items, self.charset));
 
@@ -541,6 +564,7 @@ mod tests {
             ),
             (b"tty".to_vec(), root, InodeType::CharDevice),
             (b"pipe".to_vec(), root, InodeType::NamedPipe),
+            (Vec::new(), root, InodeType::Directory),
         ];
         let t = DirTable::build(root, items, Charset::Utf8);
         let names: Vec<String> = t
@@ -550,8 +574,8 @@ mod tests {
             .collect();
         assert_eq!(names, ["Makefile", "makefile", "README", "a\u{f03a}"]);
         assert_eq!(
-            t.hidden, 1,
-            "the literal U+F03A name clashes with the mapped ':'"
+            t.hidden, 2,
+            "the empty name, and the literal U+F03A name that clashes with the mapped ':'"
         );
         assert!(t.find(&w("Makefile")).is_some());
         assert!(t.find(&w("MAKEFILE")).is_none(), "ambiguous fold must miss");

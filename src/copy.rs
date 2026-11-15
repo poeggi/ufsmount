@@ -22,6 +22,9 @@ use crate::volume::{Attr, Node, Volume};
 const EPOCH_1601: u64 = 116_444_736_000_000_000;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+/// Directory levels `cp` descends at most. FreeBSD paths are at most 1024
+/// bytes (PATH_MAX), so a real tree is not deeper.
+const MAX_DEPTH: usize = 512;
 
 pub fn systemtime(filetime: u64) -> SystemTime {
     if filetime >= EPOCH_1601 {
@@ -105,7 +108,7 @@ pub fn ls(vol: &Volume, path: &str) -> anyhow::Result<()> {
         }
         if table.hidden > 0 {
             log::warn!(
-                "{} entries not shown: their Windows names clash with other entries",
+                "{} entries not shown: their names are empty or clash with other entries",
                 table.hidden
             );
         }
@@ -175,17 +178,54 @@ pub fn cp(vol: &Volume, from: &str, to: &Path) -> anyhow::Result<Stats> {
         )));
     }
     let mut stats = Stats::default();
-    copy_node(vol, &node, &dest, &mut stats);
+    copy_node(vol, &node, &dest, 0, &mut HashSet::new(), &mut stats);
     Ok(stats)
 }
 
-fn copy_node(vol: &Volume, node: &Node, dest: &Path, stats: &mut Stats) {
+/// Whether a mapped name joins a path as exactly one new component.
+fn is_plain_name(name: &[u16]) -> bool {
+    let dot = u16::from(b'.');
+    !name.is_empty()
+        && name != [dot]
+        && name != [dot, dot]
+        && !name
+            .iter()
+            .any(|&c| c == u16::from(b'\\') || c == u16::from(b'/'))
+}
+
+/// `dirs` holds the directory inodes copied so far. UFS has no directory
+/// hard links, so one met twice is a loop on a damaged disk.
+fn copy_node(
+    vol: &Volume,
+    node: &Node,
+    dest: &Path,
+    depth: usize,
+    dirs: &mut HashSet<u32>,
+    stats: &mut Stats,
+) {
     if vol.device().is_gone() {
         stats.aborted = true;
         return;
     }
     match node.kind {
         InodeType::Directory => {
+            if !dirs.insert(node.inr.get()) {
+                log::error!(
+                    "{}: directory inode {} is linked more than once, not copied",
+                    dest.display(),
+                    node.inr
+                );
+                stats.failed += 1;
+                return;
+            }
+            if depth >= MAX_DEPTH {
+                log::error!(
+                    "{}: more than {MAX_DEPTH} directory levels, not copied",
+                    dest.display()
+                );
+                stats.failed += 1;
+                return;
+            }
             if let Err(e) = fs::create_dir_all(dest) {
                 log::error!("{}: {e}", dest.display());
                 stats.failed += 1;
@@ -202,7 +242,7 @@ fn copy_node(vol: &Volume, node: &Node, dest: &Path, stats: &mut Stats) {
             };
             if table.hidden > 0 {
                 log::error!(
-                    "{}: {} entries not copied: their Windows names clash with other entries",
+                    "{}: {} entries not copied: their names are empty or clash with other entries",
                     dest.display(),
                     table.hidden
                 );
@@ -213,6 +253,15 @@ fn copy_node(vol: &Volume, node: &Node, dest: &Path, stats: &mut Stats) {
             for e in &table.entries {
                 if stats.aborted {
                     return;
+                }
+                if !is_plain_name(&e.name) {
+                    log::error!(
+                        "{}: \"{}\" is not a valid file name, not copied",
+                        dest.display(),
+                        names::display(&e.raw)
+                    );
+                    stats.failed += 1;
+                    continue;
                 }
                 if !seen.insert(names::fold(&e.name)) {
                     log::error!(
@@ -230,7 +279,7 @@ fn copy_node(vol: &Volume, node: &Node, dest: &Path, stats: &mut Stats) {
                 };
                 let mut path: PathBuf = dest.to_path_buf();
                 path.push(OsString::from_wide(&e.name));
-                copy_node(vol, &child, &path, stats);
+                copy_node(vol, &child, &path, depth + 1, dirs, stats);
             }
             set_dir_times(vol, node, dest);
         }
@@ -355,5 +404,16 @@ mod tests {
         assert_eq!(v(r"C:\out"), r"\\?\C:\out");
         assert_eq!(v(r"\\server\share\x"), r"\\?\UNC\server\share\x");
         assert_eq!(v(r"\\?\C:\out"), r"\\?\C:\out");
+    }
+
+    #[test]
+    fn plain_names() {
+        let ok = |s: &str| is_plain_name(&s.encode_utf16().collect::<Vec<_>>());
+        assert!(ok("file.txt"));
+        assert!(ok("..."));
+        assert!(ok(".hidden"));
+        for bad in ["", ".", "..", "../x", "a/b", r"a\b", r"\x", "/x"] {
+            assert!(!ok(bad), "{bad:?}");
+        }
     }
 }

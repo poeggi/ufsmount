@@ -11,13 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
 use windows::Win32::Storage::FileSystem::GetLogicalDrives;
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
+    HKEY, HKEY_USERS, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
 };
-use windows::core::{PWSTR, w};
+use windows::core::{HSTRING, PWSTR};
 
+use super::task;
 use crate::device::{Device, Source};
 use crate::names::Charset;
 use crate::partition::{self, Candidate, human_size};
@@ -107,26 +108,23 @@ pub fn letter_order(used: u32, network: &[char]) -> Vec<char> {
         .collect()
 }
 
-/// Letters of the user's network mappings (`HKCU\Network`).
-fn network_letters() -> Vec<char> {
+/// Letters of the session user's persistent network mappings
+/// (`HKEY_USERS\<sid>\Network`). The elevated tray runs in another logon
+/// session: GetLogicalDrives does not show that user's mapped drives.
+fn network_letters(user_sid: Option<&str>) -> Vec<char> {
     let mut out = Vec::new();
+    let Some(sid) = user_sid else { return out };
+    let path = HSTRING::from(format!("{sid}\\Network"));
     let mut key = HKEY::default();
     // SAFETY: the key is closed below; the buffer is passed with its length.
     unsafe {
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            w!("Network"),
-            Some(0),
-            KEY_READ,
-            &mut key,
-        ) != ERROR_SUCCESS
-        {
+        if RegOpenKeyExW(HKEY_USERS, &path, Some(0), KEY_READ, &mut key) != ERROR_SUCCESS {
             return out;
         }
         for i in 0.. {
             let mut buf = [0u16; 64];
             let mut len = buf.len() as u32;
-            if RegEnumKeyExW(
+            match RegEnumKeyExW(
                 key,
                 i,
                 Some(PWSTR(buf.as_mut_ptr())),
@@ -135,9 +133,11 @@ fn network_letters() -> Vec<char> {
                 None,
                 None,
                 None,
-            ) != ERROR_SUCCESS
-            {
-                break;
+            ) {
+                ERROR_SUCCESS => {}
+                // A name that long is no drive letter.
+                ERROR_MORE_DATA => continue,
+                _ => break,
             }
             let name = String::from_utf16_lossy(&buf[..len as usize]);
             if let [c] = name.as_bytes() {
@@ -164,6 +164,7 @@ struct Worker {
     cap_warned: bool,
     retry: bool,
     retries_left: u8,
+    user_sid: Option<String>,
 }
 
 impl Worker {
@@ -188,6 +189,7 @@ impl Worker {
             cap_warned: false,
             retry: false,
             retries_left: RETRIES,
+            user_sid: None,
         }
     }
 
@@ -275,7 +277,7 @@ impl Worker {
                 return;
             }
         };
-        let network = network_letters();
+        let network = network_letters(self.user_sid.as_deref());
         let mut last_err = None;
         for letter in letter_order(self.used_letters(), &network)
             .into_iter()
@@ -543,7 +545,11 @@ pub fn spawn(
     let (tx, rx) = channel();
     let own_tx = tx.clone();
     // The worker owns the mounts; it is built on its own thread and never leaves it.
-    let handle = std::thread::spawn(move || Worker::new(own_tx, shared, sd, source).run(rx));
+    let handle = std::thread::spawn(move || {
+        let mut w = Worker::new(own_tx, shared, sd, source);
+        w.user_sid = task::session_user_sid().ok();
+        w.run(rx)
+    });
     (tx, handle)
 }
 
@@ -580,6 +586,14 @@ mod tests {
         w.guard(|_| ran = true);
         assert!(ran);
         assert_eq!(w.notes.len(), 1);
+    }
+
+    #[test]
+    fn network_letters_by_sid() {
+        assert!(network_letters(None).is_empty());
+        assert!(network_letters(Some("S-1-0-0")).is_empty());
+        let sid = crate::security::current_user_sid().unwrap();
+        assert!(network_letters(Some(&sid)).iter().all(char::is_ascii));
     }
 
     #[test]

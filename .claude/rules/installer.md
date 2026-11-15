@@ -4,7 +4,9 @@
 - Build: `ISCC /DAppVersion=<version> installer\ufsmount.iss`. Run ISCC from PowerShell or cmd:
   Git Bash rewrites `/D` arguments.
 - Read the Inno Setup help before changing directives. Do not try styles or options by trial.
-- WinFsp is installed when missing or older. The MSI download is checked by SHA-256. WinFsp stays on uninstall.
+- WinFsp is installed when missing or older. The MSI (next to the setup, or downloaded) is copied to `{tmp}`,
+  checked by SHA-256 there and run from there. It is ready before the tray is stopped. WinFsp stays on uninstall.
+- An unticked PATH or launcher task on an upgrade removes that PATH entry or registration.
 - An older version over a newer one asks first. Silent installs need `/ALLOWDOWNGRADE` for it.
 - PATH is edited by `ufsmount-tray --add-to-path` and `--remove-from-path`, which keep the registry type.
   Pascal script cannot read that type.
@@ -19,6 +21,8 @@
 - The UI thread runs the window, icon and menu. One worker thread does all disk work.
 - Calls that can dispatch messages (Shell_NotifyIconW, menus, message boxes) run outside `with_app`.
 - Mounts every UFS2 file system found, at most 8. Letters: U:, then T: down to D:,
-  skipping letters in use and `HKCU\Network` mappings.
+  skipping letters in use and the session user's network mappings (`HKEY_USERS\<SID>\Network`).
+- Each worker command runs under `catch_unwind`; a panic becomes an "Internal error" note.
+- A disk arrival forgets which disks held no UFS, so a swapped card is probed again.
 - A mount the user unmounted stays unmounted until the disk is plugged in again or "Rescan" is clicked.
 - The icon is loaded for the DPI of the taskbar's monitor and loaded again on DPI and display changes.

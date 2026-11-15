@@ -19,13 +19,16 @@ Write support is not a feature. UFS1 is not supported (rufs has no UFS1).
 - rufs tests: `cargo test --manifest-path vendor/fuse-ufs/Cargo.toml -p rufs --locked --ignore-rust-version`,
   with `CARGO_TARGET_DIR=temp/vendor`.
 - WinFsp minimum version: `installer/winfsp.iss` is the one source. A Rust test checks `MIN_WINFSP` against it.
-- `winfsp-x64.dll` is delay-loaded by full path from the WinFsp InstallDir, never from the exe folder.
+- `winfsp-x64.dll` is delay-loaded (every target, unit tests included) by full path from the WinFsp
+  InstallDir, never from the exe folder.
 
 ## CI (`.github/workflows/ci.yml`)
 - build: fmt, clippy, tests with a WinFsp mount, release build, the setup, and a 0.0.1 setup for the downgrade test.
 - smoke: a fresh runner without WinFsp. Installs (downloads WinFsp), mounts a test image through the tray,
   downgrades and upgrades, uninstalls, and checks that nothing is left and PATH is unchanged.
 - release: tags `v*` only. The tag must equal the Cargo version. See the release skill.
+- Actions are pinned by commit SHA with the version as a comment. Tag builds run without the cache.
+  Every job has a timeout.
 
 ## Conventions
 - Releases only on the user's explicit request.

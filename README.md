@@ -67,6 +67,7 @@ net use U: /delete
 ```
 
 - Run `register` once. All three need an elevated prompt.
+- `register` needs `ufsmount.exe` under `C:\Program Files`, as the setup installs it.
 - Windows keeps `net use` drives per logon.
   Explorer does not see a drive mapped in an elevated prompt. Use `mount` for that.
 

@@ -9,6 +9,7 @@
 
 #define AppGuid "9A3E6C51-2F4B-4E8D-9C27-5B1D3F0A8E64"
 #define UninstallKey "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{" + AppGuid + "}_is1"
+#define LauncherKey "SOFTWARE\WinFsp\Services\ufs"
 
 [Setup]
 AppId={{{#AppGuid}}
@@ -126,38 +127,61 @@ begin
       ((Minor = {#WinFspMinMinor}) and (Build >= {#WinFspMinBuild}))));
 end;
 
-{ The WinFsp MSI next to the setup exe, if it is the expected one. }
-function LocalMsiOk(const Msi: String): Boolean;
+{ The MSI is checked and run from here: Setup's own temporary folder, which is
+  protected when Setup runs elevated. The folder of the setup exe may be
+  writable by others. }
+function TmpMsi: String;
 begin
+  Result := ExpandConstant('{tmp}\{#WinFspMsi}');
+end;
+
+{ Copy the WinFsp MSI next to the setup exe, if it is the expected one. }
+function CopyLocalMsi: Boolean;
+var
+  Src: String;
+begin
+  Result := False;
+  Src := ExpandConstant('{src}\{#WinFspMsi}');
+  if not FileExists(Src) then
+    exit;
+  if not CopyFile(Src, TmpMsi, False) then begin
+    Log('WinFsp: cannot copy ' + Src);
+    exit;
+  end;
   try
-    Result := FileExists(Msi) and (GetSHA256OfFile(Msi) = '{#WinFspSha256}');
+    Result := GetSHA256OfFile(TmpMsi) = '{#WinFspSha256}';
   except
     Result := False;
   end;
+  if Result then
+    Log('WinFsp: using ' + Src)
+  else
+    DeleteFile(TmpMsi);
 end;
 
-{ Install WinFsp if it is missing or too old. Returns an error text, or ''.
+{ Put the WinFsp MSI into the temporary folder. Returns an error text, or ''. }
+function GetWinFspMsi: String;
+begin
+  Result := '';
+  if CopyLocalMsi then
+    exit;
+  try
+    DownloadTemporaryFile('{#WinFspUrl}', '{#WinFspMsi}', '{#WinFspSha256}', nil);
+  except
+    Result := 'WinFsp could not be downloaded: ' + GetExceptionMessage + #13#10#13#10 +
+      'Install WinFsp {#WinFspMinMajor}.{#WinFspMinMinor}.{#WinFspMinBuild} or later from ' +
+      'https://github.com/winfsp/winfsp/releases and run this setup again.';
+  end;
+end;
+
+{ Run the MSI from GetWinFspMsi. Returns an error text, or ''.
   A restart request of the MSI (3010) is passed on through NeedRestart. }
-function EnsureWinFsp: String;
+function InstallWinFsp: String;
 var
-  Msi, MsiLog, UI: String;
+  MsiLog, UI: String;
   Code: Integer;
 begin
   Result := '';
-  if WinFspOk then
-    exit;
-  Msi := ExpandConstant('{src}\{#WinFspMsi}');
-  if not LocalMsiOk(Msi) then begin
-    try
-      DownloadTemporaryFile('{#WinFspUrl}', '{#WinFspMsi}', '{#WinFspSha256}', nil);
-    except
-      Result := 'WinFsp could not be downloaded: ' + GetExceptionMessage + #13#10#13#10 +
-        'Install WinFsp {#WinFspMinMajor}.{#WinFspMinMinor}.{#WinFspMinBuild} or later from ' +
-        'https://github.com/winfsp/winfsp/releases and run this setup again.';
-      exit;
-    end;
-    Msi := ExpandConstant('{tmp}\{#WinFspMsi}');
-  end;
   { Next to the setup log: the temporary folder is deleted when setup ends. }
   MsiLog := ExpandConstant('{log}');
   if MsiLog = '' then
@@ -166,7 +190,7 @@ begin
     MsiLog := MsiLog + '.winfsp.txt';
   if WizardSilent then UI := '/qn' else UI := '/passive';
   if not Exec(ExpandConstant('{sys}\msiexec.exe'),
-    Format('/i "%s" /norestart %s /l*v "%s"', [Msi, UI, MsiLog]),
+    Format('/i "%s" /norestart %s /l*v "%s"', [TmpMsi, UI, MsiLog]),
     '', SW_SHOW, ewWaitUntilTerminated, Code) then
     Code := -1;
   Log(Format('WinFsp setup: exit code %d, log %s', [Code, MsiLog]));
@@ -246,15 +270,27 @@ begin
   { Keep an existing launcher registration selected. }
   if (CurPageID = wpSelectTasks) and not LauncherChecked then begin
     LauncherChecked := True;
-    if RegKeyExists(HKLM32, 'SOFTWARE\WinFsp\Services\ufs') then
+    if RegKeyExists(HKLM32, '{#LauncherKey}') then
       WizardSelectTasks('launcher');
   end;
 end;
 
+{ The MSI is in place before the tray and its mounts stop, so a failed
+  download leaves them running. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  NeedWinFsp: Boolean;
 begin
+  Result := '';
+  NeedWinFsp := not WinFspOk;
+  if NeedWinFsp then begin
+    Result := GetWinFspMsi;
+    if Result <> '' then
+      exit;
+  end;
   StopRunning;
-  Result := EnsureWinFsp;
+  if NeedWinFsp then
+    Result := InstallWinFsp;
 end;
 
 function NeedRestart: Boolean;
@@ -265,6 +301,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Params: String;
+  Code: Integer;
 begin
   if CurStep <> ssPostInstall then
     exit;
@@ -273,10 +310,15 @@ begin
     Params := Params + ' --logon';
   RunOrWarn(ExpandConstant('{app}\ufsmount-tray.exe'), Params, 'creating the start task');
   if WizardIsTaskSelected('launcher') then
-    RunOrWarn(ExpandConstant('{app}\ufsmount.exe'), 'register', 'registering with the WinFsp launcher');
-  { The exe keeps the PATH value's registry type; Pascal script cannot read it. }
+    RunOrWarn(ExpandConstant('{app}\ufsmount.exe'), 'register', 'registering with the WinFsp launcher')
+  else if RegKeyExists(HKLM32, '{#LauncherKey}') then
+    RunHidden(ExpandConstant('{app}\ufsmount.exe'), 'unregister', Code);
+  { The exe keeps the PATH value's registry type; Pascal script cannot read it.
+    --remove-from-path takes back only what --add-to-path added. }
   if WizardIsTaskSelected('path') then
-    RunOrWarn(ExpandConstant('{app}\ufsmount-tray.exe'), '--add-to-path', 'adding ufsmount to the PATH');
+    RunOrWarn(ExpandConstant('{app}\ufsmount-tray.exe'), '--add-to-path', 'adding ufsmount to the PATH')
+  else
+    RunHidden(ExpandConstant('{app}\ufsmount-tray.exe'), '--remove-from-path', Code);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

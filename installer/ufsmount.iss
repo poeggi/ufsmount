@@ -34,6 +34,9 @@ SetupIconFile=..\assets\ufsmount.ico
 UninstallDisplayIcon={app}\ufsmount-tray.exe
 UninstallDisplayName=ufsmount
 WizardStyle=modern
+; Sizes per DPI as listed for these directives in the Inno Setup help.
+WizardImageFile=..\assets\wizard\large-*.png
+WizardSmallImageFile=..\assets\wizard\small-*.png
 Compression=lzma2
 SolidCompression=yes
 SetupLogging=yes

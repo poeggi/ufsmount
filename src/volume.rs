@@ -19,6 +19,8 @@ const DIR_CACHE_ENTRIES: usize = 200_000;
 /// A table takes about 350 bytes per entry.
 const DIR_MAX_ENTRIES: usize = 1_000_000;
 const DIR_MAX_NAME_BYTES: usize = 256 << 20;
+/// rufs reads a directory up to its claimed size; a crafted size would never end.
+const DIR_MAX_BYTES: u64 = 1 << 30;
 /// Symlinks followed while resolving one path, in total (MAXSYMLINKS on FreeBSD).
 const MAX_LINKS: u32 = 32;
 
@@ -70,6 +72,12 @@ pub struct Entry {
     pub raw: Vec<u8>,
     pub inr: InodeNum,
     pub kind: InodeType,
+}
+
+/// A directory size that cannot be real: over the cap, the file system or its
+/// allocated 512-byte blocks.
+fn oversized_dir(size: u64, blocks: u64, fs_bytes: u64) -> bool {
+    size > DIR_MAX_BYTES || size > fs_bytes || size > blocks.saturating_mul(512)
 }
 
 /// All entries of one directory, without `.` and `..`.
@@ -269,6 +277,14 @@ impl Volume {
                 *used = clock;
                 return Ok(table.clone());
             }
+        }
+        let attr = self.with_ufs(|ufs| ufs.inode_attr(inr))?;
+        let fs_bytes = self.info.frags.saturating_mul(u64::from(self.info.fsize));
+        if oversized_dir(attr.size, attr.blocks, fs_bytes) {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("directory {inr}: size {} cannot be real", attr.size),
+            )));
         }
         let items = self.with_ufs(|ufs| {
             let mut items = Vec::new();
@@ -546,6 +562,17 @@ mod tests {
 
     fn w(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn directory_sizes() {
+        assert!(!oversized_dir(512, 8, 1 << 20));
+        assert!(oversized_dir(4096, 4, 1 << 20), "more than allocated");
+        assert!(
+            oversized_dir(2 << 20, 8 << 20, 1 << 20),
+            "more than the file system"
+        );
+        assert!(oversized_dir(2 << 30, 8 << 30, u64::MAX), "over the cap");
     }
 
     #[test]

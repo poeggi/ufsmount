@@ -44,4 +44,4 @@ Raw disk reads and global drive letters need admin rights. The tray and the laun
   that is empty, `.`, `..` or holds a separator.
 - `cp` copies each directory once (a second visit means a loop) and at most 512 levels deep, on its own
   16 MiB stack, and frees each listing before it descends. A directory listing stops past 1,000,000 entries
-  or 256 MiB of names.
+  or 256 MiB of names. A directory larger than 1 GiB, the file system or its allocated blocks is refused.

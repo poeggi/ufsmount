@@ -16,6 +16,9 @@
   A new checkbox list must get the same. Fixed upstream in issrc commit 5b4c39b (after 7.1.1);
   update the pin in `ci.yml` once a release has it.
 - `logos/wizard/*.png` are rendered from `logos/logo.svg` at the sizes the help lists per DPI.
+- `logos/ufsmount.ico` (exe, tray and setup icon): 16-64 px from `logos/logo-small.svg`, a bold variant
+  that stays readable in the tray; 256 px from `logos/logo.svg`. Both have a transparent background
+  and a white drive with black "U:".
 - The setup is unsigned: SmartScreen warns, Smart App Control blocks it.
 
 ## Tray (`src/tray`)

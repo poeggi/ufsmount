@@ -3,7 +3,7 @@
 //! environment variables and starts nothing through ShellExecute: both can be
 //! steered by any process of the same user.
 
-use std::ffi::OsString;
+use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
@@ -12,18 +12,19 @@ use windows::Win32::Security::{
     DuplicateTokenEx, SecurityImpersonation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID,
     TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TokenElevationTypeFull, TokenPrimary,
 };
+use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::RemoteDesktop::{
     WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_INFO_CLASS, WTSDomainName, WTSFreeMemory,
     WTSQuerySessionInformationW, WTSUserName,
 };
 use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW};
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_PROCESS_LOGON_FLAGS, CreateProcessW, CreateProcessWithTokenW,
-    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
-    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess, OpenProcessToken,
-    PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, PROCESS_CREATE_PROCESS, PROCESS_CREATION_FLAGS,
-    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
-    UpdateProcThreadAttribute, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_PROCESS_LOGON_FLAGS, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    CreateProcessWithTokenW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+    GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    OpenProcess, OpenProcessToken, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, PROCESS_CREATE_PROCESS,
+    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOEXW,
+    STARTUPINFOW, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -239,7 +240,7 @@ fn start_as_child_of(pid: u32, exe: &Path, cmd: &str, cwd: &HSTRING) -> anyhow::
         )?);
         // The new process gets the parent's token.
         let mut tok = HANDLE::default();
-        OpenProcessToken(parent.0, TOKEN_QUERY, &mut tok)?;
+        OpenProcessToken(parent.0, TOKEN_QUERY | TOKEN_DUPLICATE, &mut tok)?;
         let tok = Handle(tok);
         ensure_unelevated(tok.0)?;
         let mut size = 0usize;
@@ -265,19 +266,25 @@ fn start_as_child_of(pid: u32, exe: &Path, cmd: &str, cwd: &HSTRING) -> anyhow::
                 },
                 lpAttributeList: list,
             };
+            // The tray's own environment holds system values: the new process
+            // gets the environment of the shell's user.
+            let mut env: *mut c_void = std::ptr::null_mut();
+            CreateEnvironmentBlock(&mut env, Some(tok.0), false)?;
             let mut pi = PROCESS_INFORMATION::default();
-            CreateProcessW(
+            let created = CreateProcessW(
                 &HSTRING::from(exe.as_os_str()),
                 Some(PWSTR(cmd.as_mut_ptr())),
                 None,
                 None,
                 false,
-                EXTENDED_STARTUPINFO_PRESENT,
-                None,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                Some(env.cast_const()),
                 cwd,
                 &si.StartupInfo,
                 &mut pi,
-            )?;
+            );
+            let _ = DestroyEnvironmentBlock(env);
+            created?;
             let _ = CloseHandle(pi.hThread);
             let _ = CloseHandle(pi.hProcess);
             Ok(())

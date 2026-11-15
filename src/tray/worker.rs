@@ -2,7 +2,10 @@
 //! The tray's worker thread: all disk access, probing, mounting and unmounting.
 //! The UI thread only sends commands and shows snapshots.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,8 +14,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
-use windows::Win32::Storage::FileSystem::GetLogicalDrives;
+use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS, HANDLE};
+use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE, GetLogicalDrives};
+use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::System::Ioctl::{
+    IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery, STORAGE_DEVICE_DESCRIPTOR,
+    STORAGE_PROPERTY_QUERY, StorageDeviceProperty,
+};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_USERS, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
 };
@@ -149,6 +157,41 @@ fn network_letters(user_sid: Option<&str>) -> Vec<char> {
     out
 }
 
+/// Whether the disk has removable media (card readers, most USB sticks).
+/// None if the disk cannot be asked. The handle has no access rights and the
+/// query does not spin the disk up.
+fn removable_media(n: u32) -> Option<bool> {
+    let file = OpenOptions::new()
+        .access_mode(0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+        .open(Source::PhysicalDrive(n).path())
+        .ok()?;
+    let query = STORAGE_PROPERTY_QUERY {
+        PropertyId: StorageDeviceProperty,
+        QueryType: PropertyStandardQuery,
+        ..Default::default()
+    };
+    let mut buf = [0u8; 1024];
+    let mut returned = 0u32;
+    // SAFETY: both buffers are passed with their sizes and live through the call.
+    unsafe {
+        DeviceIoControl(
+            HANDLE(file.as_raw_handle()),
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some((&raw const query).cast()),
+            size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+            Some(buf.as_mut_ptr().cast()),
+            buf.len() as u32,
+            Some(&mut returned),
+            None,
+        )
+    }
+    .ok()?;
+    // Read as a byte: the driver fills a BOOLEAN, which need not be 0 or 1.
+    let at = std::mem::offset_of!(STORAGE_DEVICE_DESCRIPTOR, RemovableMedia);
+    (returned as usize > at).then(|| buf[at] != 0)
+}
+
 struct Worker {
     tx: Sender<Cmd>,
     shared: Arc<Shared>,
@@ -157,7 +200,8 @@ struct Worker {
     actives: Vec<Active>,
     next_id: u64,
     unmounted: HashSet<Key>,
-    no_ufs: HashSet<u32>,
+    /// Disks probed without finding UFS, and whether their media is removable.
+    no_ufs: HashMap<u32, bool>,
     notes: Vec<Note>,
     status: String,
     last_warning: Option<String>,
@@ -182,7 +226,7 @@ impl Worker {
             actives: Vec::new(),
             next_id: 1,
             unmounted: HashSet::new(),
-            no_ufs: HashSet::new(),
+            no_ufs: HashMap::new(),
             notes: Vec::new(),
             status: String::new(),
             last_warning: None,
@@ -334,7 +378,7 @@ impl Worker {
         if ufs.is_empty() {
             // Read errors (a disk still spinning up) are no proof of "no UFS".
             if dev.take_last_error().is_none() && !dev.is_gone() {
-                self.no_ufs.insert(n);
+                self.no_ufs.insert(n, removable_media(n).unwrap_or(true));
             } else {
                 log::info!("PhysicalDrive{n}: read errors while probing");
                 self.retry = true;
@@ -359,7 +403,7 @@ impl Worker {
         }
         for n in 0..MAX_DISK {
             if !manual
-                && (self.no_ufs.contains(&n) || self.actives.iter().any(|a| a.disk == Some(n)))
+                && (self.no_ufs.contains_key(&n) || self.actives.iter().any(|a| a.disk == Some(n)))
             {
                 continue;
             }
@@ -367,10 +411,12 @@ impl Worker {
         }
     }
 
-    /// After a disk went away: forget user unmounts on disk numbers that are
-    /// gone, so the disk is mounted again when it comes back.
+    /// After a disk went away: forget what is noted about disk numbers that
+    /// are gone, so a disk that comes back on that number is probed and
+    /// mounted again.
     fn forget_gone_disks(&mut self) {
         let present = |n: u32| Device::open(&Source::PhysicalDrive(n), None).is_ok();
+        self.no_ufs.retain(|&n, _| present(n));
         self.unmounted.retain(|k| k.0 == u32::MAX || present(k.0));
     }
 
@@ -443,7 +489,8 @@ impl Worker {
             }
             Cmd::Arrived => {
                 // A card reader keeps its disk number when the card is swapped.
-                self.no_ufs.clear();
+                // Fixed disks are not probed again: that would wake a sleeping disk.
+                self.no_ufs.retain(|_, removable| !*removable);
                 self.retries_left = RETRIES;
                 *rescan_at = Some(Instant::now() + DEBOUNCE);
             }
@@ -567,13 +614,30 @@ mod tests {
     }
 
     #[test]
-    fn arrival_forgets_disks_without_ufs() {
+    fn arrival_forgets_removable_disks_without_ufs() {
         let mut w = worker();
-        w.no_ufs.insert(3);
+        w.no_ufs.insert(3, true);
+        w.no_ufs.insert(4, false);
         let mut at = None;
         assert!(w.handle(Cmd::Arrived, &mut at).is_none());
-        assert!(w.no_ufs.is_empty());
+        assert!(!w.no_ufs.contains_key(&3));
+        assert!(w.no_ufs.contains_key(&4));
         assert!(at.is_some());
+    }
+
+    #[test]
+    fn removal_forgets_gone_disks() {
+        let mut w = worker();
+        w.no_ufs.insert(999, false);
+        assert!(w.handle(Cmd::Removed, &mut None).is_none());
+        assert!(w.no_ufs.is_empty());
+    }
+
+    #[test]
+    fn removable_media_query() {
+        assert_eq!(removable_media(999), None);
+        // Needs no admin rights: the handle has no access rights.
+        assert!(removable_media(0).is_some());
     }
 
     #[test]

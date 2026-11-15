@@ -185,15 +185,16 @@ impl SecurityDescriptor {
 /// denies. Other ACE types are refused.
 ///
 /// # Safety
-/// `ace` must point to a valid ACE.
+/// `ace` must point to an ACE header and the AceSize bytes it names.
 unsafe fn allow_sid_offset(ace: *const u8) -> anyhow::Result<Option<usize>> {
     // SAFETY: the header is at the start of every ACE.
-    let kind = unsafe { (*ace.cast::<ACE_HEADER>()).AceType };
-    Ok(match kind {
+    let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+    Ok(match header.AceType {
         ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE => Some(8),
         ACCESS_ALLOWED_OBJECT_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE => {
+            anyhow::ensure!(header.AceSize >= 12, "malformed ACE");
             // Header, mask, flags, then only the GUIDs the flags name.
-            // SAFETY: object ACEs have the flags after the mask.
+            // SAFETY: the ACE holds the flags after the mask.
             let flags = unsafe { ace.add(8).cast::<u32>().read_unaligned() };
             Some(12 + 16 * usize::from(flags & 1 != 0) + 16 * usize::from(flags & 2 != 0))
         }
@@ -659,6 +660,20 @@ mod tests {
         );
         // Deny ACEs only take rights away.
         assert!(SecurityDescriptor::for_files("O:BAG:BAD:(D;;FA;;;WD)(A;;FRFX;;;WD)").is_ok());
+    }
+
+    #[test]
+    fn object_ace_needs_room_for_flags() {
+        let header = |size: u8| u32::from_le_bytes([ACCESS_ALLOWED_OBJECT_ACE_TYPE, 0, size, 0]);
+        let short = [header(8), 0x001f_01ff];
+        // SAFETY: the buffer holds the 8 bytes the header names.
+        assert!(unsafe { allow_sid_offset(short.as_ptr().cast()) }.is_err());
+        let bare = [header(12), 0x001f_01ff, 0];
+        // SAFETY: the buffer holds the 12 bytes the header names.
+        assert_eq!(
+            unsafe { allow_sid_offset(bare.as_ptr().cast()) }.unwrap(),
+            Some(12)
+        );
     }
 
     #[test]

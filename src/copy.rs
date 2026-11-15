@@ -244,54 +244,14 @@ fn copy_node(
                 return;
             }
             stats.dirs += 1;
-            let table = match vol.dir(node.inr) {
-                Ok(t) => t,
-                Err(e) => {
-                    log::error!("{}: cannot list: {e}", dest.display());
-                    stats.failed += 1;
-                    return;
-                }
+            let Some(children) = children(vol, node, dest, stats) else {
+                return;
             };
-            if table.hidden > 0 {
-                log::error!(
-                    "{}: {} entries not copied: their names are empty or clash with other entries",
-                    dest.display(),
-                    table.hidden
-                );
-                stats.failed += table.hidden as u64;
-            }
-            // Windows folders are case-insensitive: Makefile and makefile would collide.
-            let mut seen = HashSet::new();
-            for e in &table.entries {
+            for (name, child) in children {
                 if stats.aborted {
                     return;
                 }
-                if !is_plain_name(&e.name) {
-                    log::error!(
-                        "{}: \"{}\" is not a valid file name, not copied",
-                        dest.display(),
-                        names::display(&e.raw)
-                    );
-                    stats.failed += 1;
-                    continue;
-                }
-                if !seen.insert(names::fold(&e.name)) {
-                    log::error!(
-                        "{}: \"{}\" differs from another entry only in case, not copied",
-                        dest.display(),
-                        names::display(&e.raw)
-                    );
-                    stats.failed += 1;
-                    continue;
-                }
-                let child = Node {
-                    inr: e.inr,
-                    kind: e.kind,
-                    parent: node.inr,
-                };
-                let mut path: PathBuf = dest.to_path_buf();
-                path.push(OsString::from_wide(&e.name));
-                copy_node(vol, &child, &path, depth + 1, dirs, stats);
+                copy_node(vol, &child, &dest.join(name), depth + 1, dirs, stats);
             }
             set_dir_times(vol, node, dest);
         }
@@ -317,6 +277,63 @@ fn copy_node(
         }
         _ => stats.skipped += 1,
     }
+}
+
+/// The entries of a directory to copy, with their Windows names. Entries that
+/// cannot be copied are logged and counted. The directory table is not kept:
+/// holding it on every level of a deep tree would take too much memory.
+fn children(
+    vol: &Volume,
+    node: &Node,
+    dest: &Path,
+    stats: &mut Stats,
+) -> Option<Vec<(OsString, Node)>> {
+    let table = match vol.dir(node.inr) {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!("{}: cannot list: {e}", dest.display());
+            stats.failed += 1;
+            return None;
+        }
+    };
+    if table.hidden > 0 {
+        log::error!(
+            "{}: {} entries not copied: their names are empty or clash with other entries",
+            dest.display(),
+            table.hidden
+        );
+        stats.failed += table.hidden as u64;
+    }
+    // Windows folders are case-insensitive: Makefile and makefile would collide.
+    let mut seen = HashSet::new();
+    let mut children = Vec::with_capacity(table.entries.len());
+    for e in &table.entries {
+        if !is_plain_name(&e.name) {
+            log::error!(
+                "{}: \"{}\" is not a valid file name, not copied",
+                dest.display(),
+                names::display(&e.raw)
+            );
+            stats.failed += 1;
+            continue;
+        }
+        if !seen.insert(names::fold(&e.name)) {
+            log::error!(
+                "{}: \"{}\" differs from another entry only in case, not copied",
+                dest.display(),
+                names::display(&e.raw)
+            );
+            stats.failed += 1;
+            continue;
+        }
+        let child = Node {
+            inr: e.inr,
+            kind: e.kind,
+            parent: node.inr,
+        };
+        children.push((OsString::from_wide(&e.name), child));
+    }
+    Some(children)
 }
 
 /// Mark a file sparse, so holes skipped below take no space. Best effort.

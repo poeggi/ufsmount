@@ -16,7 +16,8 @@ use crate::partition::{Candidate, describe_flags};
 const DIR_CACHE_ENTRIES: usize = 200_000;
 /// Entries and name bytes read from one directory at most. Real directories
 /// stay far below; a damaged one could claim more than memory holds.
-const DIR_MAX_ENTRIES: usize = 4_000_000;
+/// A table takes about 350 bytes per entry.
+const DIR_MAX_ENTRIES: usize = 1_000_000;
 const DIR_MAX_NAME_BYTES: usize = 256 << 20;
 /// Symlinks followed while resolving one path, in total (MAXSYMLINKS on FreeBSD).
 const MAX_LINKS: u32 = 32;

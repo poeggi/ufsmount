@@ -11,10 +11,10 @@ use windows::Win32::Security::Authorization::{
     GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
-    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetSecurityDescriptorDacl,
-    GetSecurityDescriptorGroup, GetSecurityDescriptorLength, GetSecurityDescriptorOwner,
-    GetTokenInformation, IsValidSecurityDescriptor, LookupAccountNameW, OWNER_SECURITY_INFORMATION,
+    ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, GetAce,
+    GetAclInformation, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorGroup,
+    GetSecurityDescriptorLength, GetSecurityDescriptorOwner, GetTokenInformation,
+    IsValidSecurityDescriptor, IsValidSid, LookupAccountNameW, OWNER_SECURITY_INFORMATION,
     PSECURITY_DESCRIPTOR, PSID, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
     TokenElevation, TokenUser,
 };
@@ -31,6 +31,13 @@ use windows::core::{BOOL, HSTRING, PWSTR};
 const MAX_SD: usize = 1024;
 
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+const ACCESS_ALLOWED_OBJECT_ACE_TYPE: u8 = 5;
+const ACCESS_DENIED_OBJECT_ACE_TYPE: u8 = 6;
+const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 9;
+const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = 10;
+const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 11;
+const ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE: u8 = 12;
 const INHERIT_ONLY_ACE: u8 = 0x08;
 /// Rights that change a file: write/append data, write EA, delete child,
 /// write attributes, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE.
@@ -164,7 +171,31 @@ impl SecurityDescriptor {
     }
 }
 
-/// The allow ACEs of a DACL that apply to the object itself: (SID string, mask).
+/// Where the SID starts in an ACE that grants access; None for an ACE that
+/// denies. Other ACE types are refused.
+///
+/// # Safety
+/// `ace` must point to a valid ACE.
+unsafe fn allow_sid_offset(ace: *const u8) -> anyhow::Result<Option<usize>> {
+    // SAFETY: the header is at the start of every ACE.
+    let kind = unsafe { (*ace.cast::<ACE_HEADER>()).AceType };
+    Ok(match kind {
+        ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE => Some(8),
+        ACCESS_ALLOWED_OBJECT_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE => {
+            // Header, mask, flags, then only the GUIDs the flags name.
+            // SAFETY: object ACEs have the flags after the mask.
+            let flags = unsafe { ace.add(8).cast::<u32>().read_unaligned() };
+            Some(12 + 16 * usize::from(flags & 1 != 0) + 16 * usize::from(flags & 2 != 0))
+        }
+        ACCESS_DENIED_ACE_TYPE
+        | ACCESS_DENIED_OBJECT_ACE_TYPE
+        | ACCESS_DENIED_CALLBACK_ACE_TYPE
+        | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE => None,
+        t => anyhow::bail!("unsupported ACE type {t}"),
+    })
+}
+
+/// The ACEs of a DACL that grant access to the object itself: (SID string, mask).
 ///
 /// # Safety
 /// `dacl` must point to a valid ACL.
@@ -182,17 +213,28 @@ unsafe fn allow_aces(dacl: *const ACL) -> anyhow::Result<Vec<(String, u32)>> {
     let mut out = Vec::new();
     for i in 0..info.AceCount {
         let mut ace: *mut c_void = std::ptr::null_mut();
-        // SAFETY: i is below the ACE count; GetAce returns a pointer into the ACL.
+        // SAFETY: i is below the ACE count; GetAce returns a pointer into the
+        // ACL. The SID is read only within the ACE's size.
         unsafe {
             GetAce(dacl, i, &mut ace)?;
+            let ace = ace.cast::<u8>().cast_const();
             let header = &*ace.cast::<ACE_HEADER>();
-            if header.AceType != ACCESS_ALLOWED_ACE_TYPE || header.AceFlags & INHERIT_ONLY_ACE != 0
-            {
+            let Some(offset) = allow_sid_offset(ace)? else {
+                continue;
+            };
+            if header.AceFlags & INHERIT_ONLY_ACE != 0 {
                 continue;
             }
-            let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
-            let sid = PSID((&raw const allowed.SidStart).cast_mut().cast());
-            out.push((sid_to_string(sid)?, allowed.Mask));
+            let size = usize::from(header.AceSize);
+            // A SID has at least 8 bytes.
+            anyhow::ensure!(offset + 8 <= size, "malformed ACE");
+            let sid = PSID(ace.add(offset).cast_mut().cast());
+            anyhow::ensure!(
+                IsValidSid(sid).as_bool() && offset + GetLengthSid(sid) as usize <= size,
+                "malformed ACE"
+            );
+            let mask = ace.add(4).cast::<u32>().read_unaligned();
+            out.push((sid_to_string(sid)?, mask));
         }
     }
     Ok(out)
@@ -460,6 +502,29 @@ mod tests {
         assert!(SecurityDescriptor::from_sddl("O:BAG:BAD:P(A;;FA;;;WD)").is_ok());
         assert!(SecurityDescriptor::for_files("O:BAG:BAD:P(A;;FA;;;WD)").is_err());
         assert!(SecurityDescriptor::for_files("O:BAG:BAD:P(A;;FRFX;;;WD)").is_ok());
+    }
+
+    #[test]
+    fn every_allow_type_grants() {
+        const G1: &str = "00000000-0000-0000-0000-000000000001";
+        const G2: &str = "00000000-0000-0000-0000-000000000002";
+        const COND: &str = "(Member_of {SID(BA)})";
+        for sddl in [
+            format!("O:BAG:BAD:(XA;;FA;;;WD;{COND})"),
+            "O:BAG:BAD:(OA;;FA;;;WD)".to_string(),
+            format!("O:BAG:BAD:(OA;;FA;{G1};;WD)"),
+            format!("O:BAG:BAD:(OA;;FA;;{G2};WD)"),
+            format!("O:BAG:BAD:(OA;;FA;{G1};{G2};WD)"),
+            format!("O:BAG:BAD:(ZA;;FA;{G1};;WD;{COND})"),
+        ] {
+            let e = SecurityDescriptor::for_files(&sddl).unwrap_err();
+            assert!(e.to_string().contains("S-1-1-0"), "{sddl}: {e}");
+        }
+        assert!(
+            SecurityDescriptor::for_files(&format!("O:BAG:BAD:(XA;;FRFX;;;WD;{COND})")).is_ok()
+        );
+        // Deny ACEs only take rights away.
+        assert!(SecurityDescriptor::for_files("O:BAG:BAD:(D;;FA;;;WD)(A;;FRFX;;;WD)").is_ok());
     }
 
     #[test]

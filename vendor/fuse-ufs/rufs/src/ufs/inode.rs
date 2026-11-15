@@ -337,6 +337,8 @@ impl<R: Backend> Ufs<R> {
 	) -> IoResult<Option<NonZeroU64>> {
 		let sb = &self.superblock;
 		let bs = sb.bsize as u64;
+		let fs = sb.fsize as u64;
+		let frag = sb.frag as u64;
 		let su64 = size_of::<UfsDaddr>() as u64;
 		let pbp = bs / su64;
 
@@ -354,7 +356,7 @@ impl<R: Backend> Ufs<R> {
 					return Ok(None);
 				}
 
-				self.read_pblock(self.check_blkno(inr, x1)?, &mut data)?;
+				self.read_pblock(self.check_blkno(inr, x1, frag)?, &mut data)?;
 				data[off]
 			}
 			InodeBlock::Indirect2(high, low) => {
@@ -363,13 +365,13 @@ impl<R: Backend> Ufs<R> {
 					return Ok(None);
 				}
 
-				self.read_pblock(self.check_blkno(inr, x1)?, &mut data)?;
+				self.read_pblock(self.check_blkno(inr, x1, frag)?, &mut data)?;
 				let x2 = data[high];
 				if x2 == 0 {
 					return Ok(None);
 				}
 
-				self.read_pblock(self.check_blkno(inr, x2)?, &mut data)?;
+				self.read_pblock(self.check_blkno(inr, x2, frag)?, &mut data)?;
 				data[low]
 			}
 			InodeBlock::Indirect3(high, mid, low) => {
@@ -378,19 +380,19 @@ impl<R: Backend> Ufs<R> {
 					return Ok(None);
 				}
 
-				self.read_pblock(self.check_blkno(inr, x1)?, &mut data)?;
+				self.read_pblock(self.check_blkno(inr, x1, frag)?, &mut data)?;
 				let x2 = data[high];
 				if x2 == 0 {
 					return Ok(None);
 				}
 
-				self.read_pblock(self.check_blkno(inr, x2)?, &mut data)?;
+				self.read_pblock(self.check_blkno(inr, x2, frag)?, &mut data)?;
 				let x3 = data[mid];
 				if x3 == 0 {
 					return Ok(None);
 				}
 
-				self.read_pblock(self.check_blkno(inr, x3)?, &mut data)?;
+				self.read_pblock(self.check_blkno(inr, x3, frag)?, &mut data)?;
 				data[low]
 			}
 		};
@@ -400,18 +402,20 @@ impl<R: Backend> Ufs<R> {
 		if bno == 0 {
 			return Ok(None);
 		}
-		Ok(NonZeroU64::new(self.check_blkno(inr, bno)?))
+		let frags = self.inode_get_block_size(ino, blkno)? as u64 / fs;
+		Ok(NonZeroU64::new(self.check_blkno(inr, bno, frags)?))
 	}
 
-	/// Check that a block number (in fragments) taken from the disk lies within
-	/// the file system. Only the start is checked, not the length of the run.
-	pub(super) fn check_blkno(&self, inr: InodeNum, bno: u64) -> IoResult<u64> {
-		if bno < self.superblock.size as u64 {
+	/// Check that a run of `frags` fragments at `bno`, a block number (in
+	/// fragments) taken from the disk, lies within the file system.
+	pub(super) fn check_blkno(&self, inr: InodeNum, bno: u64, frags: u64) -> IoResult<u64> {
+		let size = self.superblock.size as u64;
+		if bno < size && frags <= size - bno {
 			Ok(bno)
 		} else {
 			log::error!(
-				"inode {inr}: block {bno} is outside the file system ({} fragments)",
-				self.superblock.size
+				"inode {inr}: {frags} fragments at block {bno} are outside the file system \
+				 ({size} fragments)"
 			);
 			Err(err!(EIO))
 		}
@@ -465,5 +469,58 @@ mod t {
 		assert!(ufs
 			.inode_read(InodeNum::ROOT, u64::MAX - 10, &mut [0u8; 4])
 			.is_err());
+	}
+
+	/// A regular file of `size` bytes with the block pointers `blocks`.
+	fn file(size: u64, blocks: InodeBlocks) -> Inode {
+		let mut ino = Inode::new(InodeType::RegularFile, 0o644, 0, 0, 32768);
+		ino.size = size;
+		ino.data = InodeData::Blocks(blocks);
+		ino
+	}
+
+	/// Read 16 bytes at `offset` of the file `ino`. Fails with the errno.
+	fn read_file(ino: &Inode, offset: u64) -> Result<usize, Option<i32>> {
+		let mut img = image(&superblock());
+		put_inode(&mut img, InodeNum::ROOT, ino);
+		let mut ufs = open(img).unwrap();
+		ufs.inode_read(InodeNum::ROOT, offset, &mut [0u8; 16])
+			.map_err(|e| e.raw_os_error())
+	}
+
+	/// A run of fragments must end within the file system, not just start in it.
+	/// The file system of these tests has 256 fragments, 8 per block.
+	#[test]
+	fn block_runs() {
+		let ufs = open(image(&superblock())).unwrap();
+		let check = |bno, frags| ufs.check_blkno(InodeNum::ROOT, bno, frags).is_ok();
+		assert!(check(255, 1));
+		assert!(check(248, 8));
+		assert!(!check(255, 2));
+		assert!(!check(249, 8));
+		assert!(!check(256, 1));
+		assert!(!check(u64::MAX, 8));
+
+		let direct = |bno| {
+			let mut b = InodeBlocks::default();
+			b.direct[0] = bno;
+			b
+		};
+		let eio = Err(Some(libc::EIO));
+		// A full block, and a tail of one and of two fragments.
+		assert_eq!(read_file(&file(32768, direct(248)), 0), Ok(16));
+		assert_eq!(read_file(&file(32768, direct(249)), 0), eio);
+		assert_eq!(read_file(&file(100, direct(255)), 0), Ok(16));
+		assert_eq!(read_file(&file(4097, direct(255)), 0), eio);
+
+		// A pointer block.
+		let indirect = |bno| {
+			let mut b = InodeBlocks::default();
+			b.indirect[0] = bno;
+			b
+		};
+		let size = 13 * 32768;
+		assert_eq!(read_file(&file(size, indirect(248)), size - 16), Ok(16));
+		assert_eq!(read_file(&file(size, indirect(249)), size - 16), eio);
 	}
 }

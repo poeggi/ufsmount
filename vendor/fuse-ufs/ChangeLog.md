@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - rufs: the superblock layout no longer depends on the pointer size, so 32-bit targets read it correctly
 - rufs: after a failed read, `BlockReader` no longer returns zeros or stale data on the next read
 - rufs: reading the end of a file whose size is close to 2^64 gives an error instead of an overflow panic
+- rufs: data, pointer and extattr blocks that run past the end of the file system give `EIO`, not just those that start past it
 
 ## [0.6.0] - 2025-09-27
 

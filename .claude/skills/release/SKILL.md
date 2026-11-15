@@ -15,3 +15,4 @@ Only on the user's explicit request. Each push and the tag need their OK.
    `THIRD-PARTY-NOTICES.txt`, `licenses/*.txt` and `SHA256SUMS`, with generated notes.
 6. A failed tag run: find the cause before a re-run. Never move or reuse a pushed tag.
 7. Check the release page lists all assets.
+8. Delete the local `temp/installer` and `temp/release`. They hold test builds only; releases come from CI.

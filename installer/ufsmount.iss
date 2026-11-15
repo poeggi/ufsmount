@@ -151,11 +151,10 @@ begin
     Log('WinFsp: not the expected MSI: ' + Src);
 end;
 
-{ Put the WinFsp MSI into Setup's own temporary folder, which is protected
-  when Setup runs elevated; the folder of the setup exe may be writable by
-  others. Msi is the checked file. Returns an error text, or ''.
-  CopyFile keeps a read-only attribute, so the local copy has its own name
-  and cannot block the download. }
+{ Put the checked WinFsp MSI into Setup's temporary folder: admin-only when
+  elevated, unlike perhaps the setup's own folder. Msi gets its path. Returns
+  an error text, or ''. The local copy has its own name: CopyFile keeps a
+  read-only attribute, which would block the download. }
 function GetWinFspMsi(var Msi: String): String;
 begin
   Result := '';

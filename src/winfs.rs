@@ -693,8 +693,11 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The disk of a `serve()` mount went away. The mount is stopped and unmounted.
 #[derive(Debug, thiserror::Error)]
-#[error("{0}: the disk is gone, unmounted")]
+#[error("{0}: the disk is gone")]
 pub struct DiskGone(pub String);
+
+/// Exit code of `ufsmount` after `DiskGone`.
+pub const EXIT_DISK_GONE: u8 = 3;
 
 /// Whether the start callback ran. Once `serve()` gives up waiting for it, a
 /// start is refused: nothing would watch the disk.
@@ -739,17 +742,15 @@ enum End {
 }
 
 /// Wait for a message on `ended` (the service ended). Asks `alive` every
-/// `every`. From `start_timeout` on, asks `abandon_start` once: true means the
-/// start callback did not run and will not, so waiting ends.
+/// `every`. After `start_timeout` without a start, abandons it and returns.
 fn wait_for_end(
     ended: &Receiver<()>,
     every: Duration,
     start_timeout: Duration,
     mut alive: impl FnMut() -> bool,
-    mut abandon_start: impl FnMut() -> bool,
+    gate: &StartGate,
 ) -> End {
     let begin = Instant::now();
-    let mut started = false;
     loop {
         match ended.recv_timeout(every) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => return End::Stopped,
@@ -757,11 +758,8 @@ fn wait_for_end(
                 if !alive() {
                     return End::DiskGone;
                 }
-                if !started && begin.elapsed() >= start_timeout {
-                    if abandon_start() {
-                        return End::Stopped;
-                    }
-                    started = true;
+                if begin.elapsed() >= start_timeout && gate.abandon() {
+                    return End::Stopped;
                 }
             }
         }
@@ -839,13 +837,7 @@ pub fn serve(
     service
         .start()
         .map_err(|e| anyhow::anyhow!("cannot start: {e:?}"))?;
-    let end = wait_for_end(
-        &ended,
-        WATCH_EVERY,
-        START_TIMEOUT,
-        || dev.is_alive(),
-        || gate.abandon(),
-    );
+    let end = wait_for_end(&ended, WATCH_EVERY, START_TIMEOUT, || dev.is_alive(), &gate);
     let joined = if end == End::DiskGone {
         // The deadline thread ends when `_stopped` drops after the join.
         let (_stopped, stopping) = mpsc::channel::<()>();
@@ -853,7 +845,7 @@ pub fn serve(
         std::thread::spawn(move || {
             if let Err(RecvTimeoutError::Timeout) = stopping.recv_timeout(STOP_TIMEOUT) {
                 log::error!("{name}: the disk is gone, the unmount did not finish");
-                std::process::exit(3);
+                std::process::exit(EXIT_DISK_GONE.into());
             }
         });
         // FspServiceStop runs the stop callback here: stop and unmount.
@@ -964,8 +956,9 @@ mod tests {
         let ms = Duration::from_millis;
         let (tx, rx) = mpsc::channel();
         tx.send(()).unwrap();
+        let gate = StartGate::new();
         assert_eq!(
-            wait_for_end(&rx, ms(1), ms(1), || true, || true),
+            wait_for_end(&rx, ms(1), ms(1), || true, &gate),
             End::Stopped
         );
 
@@ -975,38 +968,28 @@ mod tests {
             checks < 5
         };
         assert_eq!(
-            wait_for_end(&rx, ms(1), ms(10_000), alive, || true),
+            wait_for_end(&rx, ms(1), ms(10_000), alive, &gate),
             End::DiskGone
         );
         assert_eq!(
-            wait_for_end(&rx, ms(1), ms(1), || false, || true),
+            wait_for_end(&rx, ms(1), ms(1), || false, &gate),
             End::DiskGone
         );
 
         // Started: the disk is still watched after the start timeout.
-        let gate = StartGate::new();
         assert!(gate.start());
-        let mut asked = 0;
         let mut checks = 0;
         let alive = || {
             checks += 1;
             checks < 20
         };
-        let abandon = || {
-            asked += 1;
-            gate.abandon()
-        };
-        assert_eq!(
-            wait_for_end(&rx, ms(1), ms(1), alive, abandon),
-            End::DiskGone
-        );
-        assert_eq!(asked, 1);
+        assert_eq!(wait_for_end(&rx, ms(1), ms(1), alive, &gate), End::DiskGone);
         assert!(gate.started());
 
         // Not started: waiting ends after the start timeout, a late start is refused.
         let gate = StartGate::new();
         assert_eq!(
-            wait_for_end(&rx, ms(1), ms(20), || true, || gate.abandon()),
+            wait_for_end(&rx, ms(1), ms(20), || true, &gate),
             End::Stopped
         );
         assert!(!gate.start());
@@ -1014,7 +997,7 @@ mod tests {
 
         drop(tx);
         assert_eq!(
-            wait_for_end(&rx, ms(1), ms(10_000), || true, || true),
+            wait_for_end(&rx, ms(1), ms(10_000), || true, &StartGate::new()),
             End::Stopped
         );
     }

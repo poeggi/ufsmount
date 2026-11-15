@@ -564,7 +564,7 @@ pub fn secure_dir(dir: &Path, sddl: &str) -> anyhow::Result<()> {
     set_security(&h, dir, &sd)
 }
 
-/// The access [`set_security`] needs, plus reading the checks' data.
+/// Access for the folder checks and [`set_security`].
 const SECURE_ACCESS: u32 = READ_CONTROL.0 | WRITE_DAC.0 | WRITE_OWNER.0 | FILE_READ_ATTRIBUTES.0;
 
 /// Give the folder open as `h` the owner and the protected DACL of `sd`.
@@ -622,6 +622,7 @@ pub fn remove_dir(dir: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use windows::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+    use windows::Win32::Security::OBJECT_SECURITY_INFORMATION;
 
     #[test]
     fn default_descriptor() {
@@ -787,30 +788,18 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    /// Owner and DACL of `path` as SDDL.
-    fn sddl_of(path: &Path) -> String {
-        let h = open_no_follow(path, READ_CONTROL.0).unwrap();
-        let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
-        let mut psd = PSECURITY_DESCRIPTOR::default();
+    const OWNER_DACL: OBJECT_SECURITY_INFORMATION =
+        OBJECT_SECURITY_INFORMATION(OWNER_SECURITY_INFORMATION.0 | DACL_SECURITY_INFORMATION.0);
+
+    /// Owner and DACL of `psd` as SDDL. Frees `psd`.
+    fn take_sddl(psd: PSECURITY_DESCRIPTOR) -> String {
         let mut s = PWSTR::null();
-        // SAFETY: out pointers are valid; both results are freed with LocalFree.
+        // SAFETY: `psd` is a LocalAlloc'd descriptor; both are freed with LocalFree.
         unsafe {
-            GetSecurityInfo(
-                h.0,
-                SE_FILE_OBJECT,
-                info,
-                None,
-                None,
-                None,
-                None,
-                Some(&mut psd),
-            )
-            .ok()
-            .unwrap();
             ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 psd,
                 SDDL_REVISION_1,
-                info,
+                OWNER_DACL,
                 &mut s,
                 None,
             )
@@ -822,13 +811,33 @@ mod tests {
         }
     }
 
+    /// Owner and DACL of `path` as SDDL.
+    fn sddl_of(path: &Path) -> String {
+        let h = open_no_follow(path, READ_CONTROL.0).unwrap();
+        let mut psd = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: the out pointer is valid; `take_sddl` frees the result.
+        unsafe {
+            GetSecurityInfo(
+                h.0,
+                SE_FILE_OBJECT,
+                OWNER_DACL,
+                None,
+                None,
+                None,
+                None,
+                Some(&mut psd),
+            )
+            .ok()
+            .unwrap();
+        }
+        take_sddl(psd)
+    }
+
     /// Owner and DACL of `sddl` as Windows writes them back: well-known
     /// accounts become aliases (the built-in Administrator is `LA`).
     fn canonical(sddl: &str) -> String {
-        let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
         let mut psd = PSECURITY_DESCRIPTOR::default();
-        let mut s = PWSTR::null();
-        // SAFETY: out pointers are valid; both results are freed with LocalFree.
+        // SAFETY: the out pointer is valid; `take_sddl` frees the result.
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 &HSTRING::from(sddl),
@@ -837,19 +846,8 @@ mod tests {
                 None,
             )
             .unwrap();
-            ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                psd,
-                SDDL_REVISION_1,
-                info,
-                &mut s,
-                None,
-            )
-            .unwrap();
-            let out = s.to_string().unwrap();
-            LocalFree(Some(HLOCAL(s.0.cast())));
-            LocalFree(Some(HLOCAL(psd.0)));
-            out
         }
+        take_sddl(psd)
     }
 
     #[test]
@@ -873,8 +871,8 @@ mod tests {
             canonical(&format!("O:{me}D:P(A;OICI;FA;;;{me})"))
         );
         // Children keep their access entries: nothing is pushed down to them.
-        // Windows may report entries the parent no longer passes on without
-        // the inherited flag (seen as the built-in Administrator).
+        // Compared without the inherited flag: Windows may drop it on entries
+        // the parent does not pass on.
         let entries = |sddl: String| sddl.replace(";ID;", ";;");
         assert_eq!(
             entries(sddl_of(&child)),

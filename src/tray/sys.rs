@@ -187,7 +187,7 @@ pub fn run_hidden(exe: &Path, args: &str) -> anyhow::Result<u32> {
 /// Refuse the full token of a UAC split logon: its user has a limited one.
 /// A token without a split (UAC off, the built-in Administrator) is the
 /// user's only token and is allowed, elevated or not.
-fn ensure_unelevated(token: HANDLE) -> anyhow::Result<()> {
+fn refuse_uac_full(token: HANDLE) -> anyhow::Result<()> {
     anyhow::ensure!(
         token_elevation_type(token)? != TokenElevationTypeFull,
         "the desktop shell runs elevated"
@@ -242,7 +242,7 @@ fn start_as_child_of(pid: u32, exe: &Path, cmd: &str, cwd: &HSTRING) -> anyhow::
         let mut tok = HANDLE::default();
         OpenProcessToken(parent.0, TOKEN_QUERY | TOKEN_DUPLICATE, &mut tok)?;
         let tok = Handle(tok);
-        ensure_unelevated(tok.0)?;
+        refuse_uac_full(tok.0)?;
         let mut size = 0usize;
         let _ = InitializeProcThreadAttributeList(None, 1, None, &mut size);
         // The list holds pointers: the buffer needs their alignment.
@@ -316,7 +316,7 @@ fn start_with_shell_token(pid: u32, exe: &Path, cmd: &str, cwd: &HSTRING) -> any
             &mut dup,
         )?;
         let dup = Handle(dup);
-        ensure_unelevated(dup.0)?;
+        refuse_uac_full(dup.0)?;
         let si = STARTUPINFOW {
             cb: size_of::<STARTUPINFOW>() as u32,
             ..Default::default()

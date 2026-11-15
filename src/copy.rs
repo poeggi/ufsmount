@@ -25,6 +25,9 @@ const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
 /// Directory levels `cp` descends at most. FreeBSD paths are at most 1024
 /// bytes (PATH_MAX), so a real tree is not deeper.
 const MAX_DEPTH: usize = 512;
+/// Entries `cp` holds at once: each level keeps the rest of its directory
+/// while it copies the one below.
+const MAX_HELD: usize = 4_000_000;
 
 pub fn systemtime(filetime: u64) -> SystemTime {
     if filetime >= EPOCH_1601 {
@@ -129,6 +132,7 @@ pub struct Stats {
     pub failed: u64,
     /// The disk went away during the copy.
     pub aborted: bool,
+    held: usize,
 }
 
 /// `\\?\` form of an absolute path: Win32 name parsing (DOS device names
@@ -247,12 +251,23 @@ fn copy_node(
             let Some(children) = children(vol, node, dest, stats) else {
                 return;
             };
+            let n = children.len();
+            if stats.held + n > MAX_HELD {
+                log::error!(
+                    "{}: more than {MAX_HELD} entries on this path, not copied",
+                    dest.display()
+                );
+                stats.failed += 1;
+                return;
+            }
+            stats.held += n;
             for (name, child) in children {
                 if stats.aborted {
                     return;
                 }
                 copy_node(vol, &child, &dest.join(name), depth + 1, dirs, stats);
             }
+            stats.held -= n;
             set_dir_times(vol, node, dest);
         }
         InodeType::RegularFile => match copy_file(vol, node, dest) {
@@ -280,8 +295,8 @@ fn copy_node(
 }
 
 /// The entries of a directory to copy, with their Windows names. Entries that
-/// cannot be copied are logged and counted. The directory table is not kept:
-/// holding it on every level of a deep tree would take too much memory.
+/// cannot be copied are logged and counted. Smaller than the directory table,
+/// which is not kept while the levels below are copied.
 fn children(
     vol: &Volume,
     node: &Node,

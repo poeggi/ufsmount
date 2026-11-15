@@ -9,7 +9,7 @@
 - A failed read first checks that the disk is still there. Only media errors of a present disk are
   remembered as bad sectors; ERROR_IO_DEVICE (1117, USB resets) never is. After any failed chunk read
   on a present disk, that chunk is read sector by sector.
-- A gone disk stops its mount (exit code 3). An unmount that hangs on the dying disk ends after 30 s.
+- A gone disk stops its mount. `ufsmount` then exits with 3, after 30 s at the latest if the unmount hangs.
 - Errors carry the Win32 code (`DeviceError`). Log errno values by name: on Windows errno 5 prints as "Access is denied".
 - Names: valid UTF-8 as is. Characters Windows forbids, and `/`, map to U+F000 + char. Invalid bytes map to U+F100 + byte,
   or decode as Latin-1 with `--charset latin1`. The mapping is never reversed.

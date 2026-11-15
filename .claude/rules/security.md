@@ -8,7 +8,7 @@ Raw disk reads and global drive letters need admin rights. The tray and the laun
 - The elevated tray resets `SystemRoot`, `windir`, `TEMP`, `TMP` and `PATH` from the APIs before any thread
   starts: the task gives it the user's environment. Child processes start by full path, in System32.
 - No `RUST_LOG`, no ShellExecute. A failed DLL search hardening is fatal.
-- "Open" starts `explorer.exe` in System32 with the shell's token and the shell user's environment. It refuses
+- "Open" starts `<Windows>\explorer.exe` in System32 as working folder, with the shell's token and the shell user's environment. It refuses
   a UAC full token (the elevated half of a split logon); with UAC off there is no lower token to use.
 - ProgramData folders are created together with their security descriptor (`CreateDirectoryW` with
   `SECURITY_ATTRIBUTES`). An existing folder is opened once without following links; its checks and
@@ -43,5 +43,6 @@ Raw disk reads and global drive letters need admin rights. The tray and the laun
 - A name never leaves its folder: `/` maps like the other forbidden characters, and `cp` refuses a name
   that is empty, `.`, `..` or holds a separator.
 - `cp` copies each directory once (a second visit means a loop) and at most 512 levels deep, on its own
-  16 MiB stack, and frees each listing before it descends. A directory listing stops past 1,000,000 entries
-  or 256 MiB of names. A directory larger than 1 GiB, the file system or its allocated blocks is refused.
+  16 MiB stack. It holds at most 4,000,000 entries over all levels.
+- A directory listing stops past 1,000,000 entries or 256 MiB of names.
+  A directory larger than 1 GiB or the file system is refused (the latter by rufs).

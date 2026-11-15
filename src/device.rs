@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn other_errors_mark_only_the_chunk() {
-        // ERROR_SEM_TIMEOUT, and ERROR_IO_DEVICE: a reset, or a bad sector behind a USB bridge.
+        // A timeout, and the code some USB bridges give for a bad sector.
         for code in [121, ERROR_IO_DEVICE] {
             let data = pattern(2 * CHUNK as usize);
             let mut disk = FakeDisk::new(data.clone(), 512);

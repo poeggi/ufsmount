@@ -4,8 +4,8 @@
 - Build: `ISCC /DAppVersion=<version> installer\ufsmount.iss`. Run ISCC from PowerShell or cmd:
   Git Bash rewrites `/D` arguments.
 - Read the Inno Setup help before changing directives. Do not try styles or options by trial.
-- WinFsp is installed when missing or older. The MSI (next to the setup, or downloaded) is copied to `{tmp}`,
-  checked by SHA-256 there and run from there. It is ready before the tray is stopped. WinFsp stays on uninstall.
+- WinFsp is installed when missing or older. The MSI is copied from next to the setup, or downloaded, into `{tmp}`,
+  checked by SHA-256 and run there. It is ready before the tray is stopped. WinFsp stays on uninstall.
 - An unticked PATH or launcher task on an upgrade removes that PATH entry or registration.
   `/TASKS=` or `/MERGETASKS=` on the command line win over the preselected launcher task.
 - An older version over a newer one asks first. Silent installs need `/ALLOWDOWNGRADE` for it.

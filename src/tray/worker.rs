@@ -160,8 +160,7 @@ fn network_letters(user_sid: Option<&str>) -> Vec<char> {
 }
 
 /// Whether the disk has removable media (card readers, most USB sticks).
-/// None if the disk cannot be asked. The handle has no access rights and the
-/// query does not spin the disk up.
+/// None if the disk cannot be asked. The query does not spin the disk up.
 fn removable_media(n: u32) -> Option<bool> {
     let file = OpenOptions::new()
         .access_mode(0)
@@ -419,7 +418,7 @@ impl Worker {
     /// are gone, so a disk that comes back on that number is probed and
     /// mounted again.
     fn forget_gone_disks(&mut self) {
-        let present = |n: u32| Device::open(&Source::PhysicalDrive(n), None).is_ok();
+        let present = |n: u32| removable_media(n).is_some();
         self.no_ufs.retain(|&n, _| present(n));
         self.unmounted.retain(|k| k.0 == u32::MAX || present(k.0));
     }

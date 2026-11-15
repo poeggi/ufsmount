@@ -211,7 +211,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e:#}");
             if e.is::<winfs::DiskGone>() {
-                ExitCode::from(3)
+                ExitCode::from(winfs::EXIT_DISK_GONE)
             } else {
                 ExitCode::from(2)
             }

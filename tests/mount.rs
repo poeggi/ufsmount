@@ -8,7 +8,7 @@ use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -53,11 +53,19 @@ fn enabled() -> bool {
     on
 }
 
+/// Two WinFsp mounts that start at the same moment can fail with an invalid
+/// parameter error. Each mount test holds this lock for its whole run.
+static MOUNTS: Mutex<()> = Mutex::new(());
+
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    MOUNTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn free_letter() -> char {
     free_letter_in('M'..='Z')
 }
 
-/// Tests run in parallel; each test uses its own range of letters.
+/// Each test uses its own range of letters.
 fn free_letter_in(range: std::ops::RangeInclusive<char>) -> char {
     range
         .rev()
@@ -102,6 +110,7 @@ fn mount(image: &Path) -> Option<Mounted> {
 
 #[test]
 fn mounted_image() {
+    let _lock = one_at_a_time();
     for name in IMAGES {
         let path = write_temp(&format!("mount-{name}"), &image_bytes(name));
         let Some(m) = mount(&path) else { return };
@@ -181,6 +190,7 @@ fn failed_mount_exits_with_an_error() {
     if !enabled() {
         return;
     }
+    let _lock = one_at_a_time();
     let path = write_temp("mount-busy", &image_bytes("ufs-little"));
     let windows = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
     let mut child = spawn(&path, &windows);
@@ -204,6 +214,7 @@ fn mount_stop_releases_device() {
     if !enabled() {
         return;
     }
+    let _lock = one_at_a_time();
     ufsmount::winfs::load_winfsp().unwrap();
     let path = write_temp("mount-api", &image_bytes(IMAGES[0]));
     let (vol, _) = open(&path, None);

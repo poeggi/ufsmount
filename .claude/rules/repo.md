@@ -14,7 +14,8 @@ Write support is not a feature. UFS1 is not supported (rufs has no UFS1).
 - Rust stable, MSVC target, VS Build Tools (C++), LLVM (libclang for bindgen in winfsp-sys).
 - Before a commit: `cargo fmt --check`, `cargo clippy --all-targets --locked --no-deps -- -D warnings`, `cargo test --locked`.
 - Mount tests need WinFsp and run only with `UFSMOUNT_MOUNT_TEST=1`.
-  Tests in `tests/mount.rs` run in parallel; each test uses its own drive letter range.
+  The tests in `tests/mount.rs` mount one at a time (a shared lock): two WinFsp mounts starting
+  at the same moment can fail.
 - rufs tests: `cargo test --manifest-path vendor/fuse-ufs/Cargo.toml -p rufs --locked --ignore-rust-version`,
   with `CARGO_TARGET_DIR=temp/vendor`.
 - WinFsp minimum version: `installer/winfsp.iss` is the one source. A Rust test checks `MIN_WINFSP` against it.

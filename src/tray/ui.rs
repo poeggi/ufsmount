@@ -79,8 +79,11 @@ struct App {
     shared: Arc<Shared>,
     taskbar_created: u32,
     added: bool,
+    /// The loss of the icon is logged; cleared once the shell takes a call again.
+    loss_logged: bool,
     quitting: bool,
     menu_open: bool,
+    about_open: bool,
 }
 
 thread_local! {
@@ -288,7 +291,9 @@ fn on_state() {
             });
         }
     }
-    if !ok {
+    if ok {
+        with_app(|a| a.loss_logged = false);
+    } else {
         icon_lost(hwnd);
     }
 }
@@ -296,8 +301,13 @@ fn on_state() {
 /// A shell call failed: Explorer is gone or busy. Add the icon again until
 /// that works; on_state follows.
 fn icon_lost(hwnd: HWND) {
-    log::warn!("the notification icon is gone; adding it again");
-    with_app(|a| a.added = false);
+    let first = with_app(|a| {
+        a.added = false;
+        !std::mem::replace(&mut a.loss_logged, true)
+    });
+    if first == Some(true) {
+        log::warn!("the notification icon is gone; adding it again");
+    }
     // SAFETY: our own window.
     unsafe { SetTimer(Some(hwnd), TIMER_ADD_ICON, 2000, None) };
 }
@@ -402,7 +412,12 @@ fn act(hwnd: HWND, cmd: u32, actions: Vec<(u32, Action)>) {
     match cmd {
         0 => {}
         ID_RESCAN => send(Cmd::Rescan { manual: true }),
-        ID_ABOUT => message_box(hwnd, ABOUT, false),
+        ID_ABOUT => {
+            if with_app(|a| std::mem::replace(&mut a.about_open, true)) == Some(false) {
+                message_box(hwnd, ABOUT, false);
+                with_app(|a| a.about_open = false);
+            }
+        }
         ID_QUIT => quit(Duration::from_secs(15)),
         id => match actions.into_iter().find(|a| a.0 == id).map(|a| a.1) {
             Some(Action::Open(letter)) => {
@@ -601,8 +616,10 @@ pub fn run(inst: Instance, source: Option<PathBuf>, sd: SecurityDescriptor) -> E
             shared,
             taskbar_created,
             added: false,
+            loss_logged: false,
             quitting: false,
             menu_open: false,
+            about_open: false,
         })
     });
     if !add_icon() {

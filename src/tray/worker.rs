@@ -41,6 +41,8 @@ const WATCH_EVERY: Duration = Duration::from_secs(2);
 /// A disk that gave read errors while probing (not ready yet) is probed again.
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 const RETRIES: u8 = 3;
+/// Notes queued while the UI cannot show them; the oldest are dropped.
+const MAX_NOTES: usize = 16;
 
 pub enum Cmd {
     /// Probe disks that are not mounted. `manual` also forgets user unmounts.
@@ -267,6 +269,8 @@ impl Worker {
             let mut snap = self.shared.snap.lock().unwrap_or_else(|e| e.into_inner());
             snap.mounts = mounts;
             snap.notes.append(&mut self.notes);
+            let extra = snap.notes.len().saturating_sub(MAX_NOTES);
+            snap.notes.drain(..extra);
             snap.status = self.status.clone();
         }
         (self.shared.notify)();
@@ -638,6 +642,19 @@ mod tests {
         assert_eq!(removable_media(999), None);
         // Needs no admin rights: the handle has no access rights.
         assert!(removable_media(0).is_some());
+    }
+
+    #[test]
+    fn queued_notes_are_capped() {
+        let mut w = worker();
+        for i in 0..MAX_NOTES + 4 {
+            w.note("t", i.to_string(), false);
+            w.publish();
+        }
+        let snap = w.shared.snap.lock().unwrap();
+        assert_eq!(snap.notes.len(), MAX_NOTES);
+        assert_eq!(snap.notes[0].1, "4");
+        assert_eq!(snap.notes[MAX_NOTES - 1].1, (MAX_NOTES + 3).to_string());
     }
 
     #[test]

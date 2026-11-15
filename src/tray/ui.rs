@@ -227,22 +227,22 @@ fn on_dpi_change() {
     }
 }
 
-fn set_tip(hwnd: HWND, tip: &str) {
+fn set_tip(hwnd: HWND, tip: &str) -> bool {
     let mut nid = icon_data(hwnd);
     nid.uFlags = NIF_TIP | NIF_SHOWTIP;
     copy_str(&mut nid.szTip, tip);
     // SAFETY: nid is fully initialised.
-    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) }.as_bool()
 }
 
-fn balloon(hwnd: HWND, title: &str, text: &str, warn: bool) {
+fn balloon(hwnd: HWND, title: &str, text: &str, warn: bool) -> bool {
     let mut nid = icon_data(hwnd);
     nid.uFlags = NIF_INFO;
     nid.dwInfoFlags = if warn { NIIF_WARNING } else { NIIF_INFO };
     copy_str(&mut nid.szInfoTitle, title);
     copy_str(&mut nid.szInfo, text);
     // SAFETY: nid is fully initialised.
-    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) }.as_bool()
 }
 
 fn delete_icon(hwnd: HWND) {
@@ -252,14 +252,15 @@ fn delete_icon(hwnd: HWND) {
 }
 
 /// New state from the worker: tooltip, and the queued notes as one balloon.
-/// Notes wait while the icon is not there yet.
+/// Notes wait until the shell has taken them.
 fn on_state() {
     let Some((hwnd, snap, added)) = with_app(|a| {
-        let mut s = a.shared.snap.lock().unwrap_or_else(|e| e.into_inner());
-        let snap = s.clone();
-        if a.added {
-            s.notes.clear();
-        }
+        let snap = a
+            .shared
+            .snap
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         (a.hwnd, snap, a.added)
     }) else {
         return;
@@ -267,8 +268,8 @@ fn on_state() {
     if !added {
         return;
     }
-    set_tip(hwnd, &tooltip(&snap));
-    if let Some((title, _, _)) = snap.notes.first() {
+    let mut ok = set_tip(hwnd, &tooltip(&snap));
+    if ok && let Some((title, _, _)) = snap.notes.first() {
         let warn = snap.notes.iter().any(|n| n.2);
         let text: Vec<&str> = snap.notes.iter().map(|n| n.1.as_str()).collect();
         let title = if snap.notes.len() == 1 {
@@ -276,8 +277,29 @@ fn on_state() {
         } else {
             "ufsmount"
         };
-        balloon(hwnd, title, &text.join("\n"), warn);
+        ok = balloon(hwnd, title, &text.join("\n"), warn);
+        if ok {
+            with_app(|a| {
+                let mut s = a.shared.snap.lock().unwrap_or_else(|e| e.into_inner());
+                // A nested call during the shell call may have shown them already.
+                if s.notes.starts_with(&snap.notes) {
+                    s.notes.drain(..snap.notes.len());
+                }
+            });
+        }
     }
+    if !ok {
+        icon_lost(hwnd);
+    }
+}
+
+/// A shell call failed: Explorer is gone or busy. Add the icon again until
+/// that works; on_state follows.
+fn icon_lost(hwnd: HWND) {
+    log::warn!("the notification icon is gone; adding it again");
+    with_app(|a| a.added = false);
+    // SAFETY: our own window.
+    unsafe { SetTimer(Some(hwnd), TIMER_ADD_ICON, 2000, None) };
 }
 
 fn send(cmd: Cmd) {
@@ -325,15 +347,20 @@ fn show_menu(x: i32, y: i32) {
     }) else {
         return;
     };
-    run_menu(hwnd, &snap, x, y);
+    let picked = track_menu(hwnd, &snap, x, y);
+    // The About box is modal too; the icon must answer while it is up.
     with_app(|a| a.menu_open = false);
+    if let Some((cmd, actions)) = picked {
+        act(hwnd, cmd, actions);
+    }
 }
 
-fn run_menu(hwnd: HWND, snap: &Snapshot, x: i32, y: i32) {
+/// Show the menu; the chosen command (0 for none) and the mount actions.
+fn track_menu(hwnd: HWND, snap: &Snapshot, x: i32, y: i32) -> Option<(u32, Vec<(u32, Action)>)> {
     let mut actions: Vec<(u32, Action)> = Vec::new();
     // SAFETY: menu handles are created and destroyed here; strings live through each call.
     let cmd = unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
+        let menu = CreatePopupMenu().ok()?;
         for (i, m) in snap.mounts.iter().enumerate() {
             let open = ID_MOUNTS + 2 * i as u32;
             if let Ok(sub) = CreatePopupMenu() {
@@ -368,6 +395,10 @@ fn run_menu(hwnd: HWND, snap: &Snapshot, x: i32, y: i32) {
         let _ = DestroyMenu(menu);
         cmd
     };
+    Some((cmd, actions))
+}
+
+fn act(hwnd: HWND, cmd: u32, actions: Vec<(u32, Action)>) {
     match cmd {
         0 => {}
         ID_RESCAN => send(Cmd::Rescan { manual: true }),

@@ -822,6 +822,36 @@ mod tests {
         }
     }
 
+    /// Owner and DACL of `sddl` as Windows writes them back: well-known
+    /// accounts become aliases (the built-in Administrator is `LA`).
+    fn canonical(sddl: &str) -> String {
+        let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+        let mut psd = PSECURITY_DESCRIPTOR::default();
+        let mut s = PWSTR::null();
+        // SAFETY: out pointers are valid; both results are freed with LocalFree.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                &HSTRING::from(sddl),
+                SDDL_REVISION_1,
+                &mut psd,
+                None,
+            )
+            .unwrap();
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                psd,
+                SDDL_REVISION_1,
+                info,
+                &mut s,
+                None,
+            )
+            .unwrap();
+            let out = s.to_string().unwrap();
+            LocalFree(Some(HLOCAL(s.0.cast())));
+            LocalFree(Some(HLOCAL(psd.0)));
+            out
+        }
+    }
+
     #[test]
     fn set_security_through_handle() {
         // A user-owned folder and descriptor, so this runs without admin rights.
@@ -838,7 +868,10 @@ mod tests {
         let h = open_no_follow(&base, SECURE_ACCESS).unwrap();
         set_security(&h, &base, &sd).unwrap();
         drop(h);
-        assert_eq!(sddl_of(&base), format!("O:{me}D:P(A;OICI;FA;;;{me})"));
+        assert_eq!(
+            sddl_of(&base),
+            canonical(&format!("O:{me}D:P(A;OICI;FA;;;{me})"))
+        );
         assert_eq!(
             sddl_of(&child),
             child_before,

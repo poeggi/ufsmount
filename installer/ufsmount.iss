@@ -227,6 +227,15 @@ begin
     mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
 end;
 
+procedure InitializeWizard;
+begin
+  { Offset is the room left of a task checkbox and between it and its text.
+    Inno Setup 7.1.1 reserves too little room for the checkbox at high DPI and
+    clips it (fixed upstream after 7.1.1), so the growth of the 13 px checkbox
+    is added. }
+  WizardForm.TasksList.Offset := ScaleX(8) + ScaleX(13) - 13;
+end;
+
 procedure CurPageChanged(CurPageID: Integer);
 begin
   { Keep an existing launcher registration selected. }

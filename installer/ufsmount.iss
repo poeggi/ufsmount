@@ -66,7 +66,7 @@ Filename: "{app}\ufsmount-tray.exe"; Description: "Start ufsmount"; Flags: posti
 
 [Code]
 var
-  LauncherChecked: Boolean;
+  TasksChecked: Boolean;
   RestartNeeded: Boolean;
 
 { --- running processes --- }
@@ -273,14 +273,22 @@ begin
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
+var
+  SignIn: AnsiString;
 begin
-  { Keep an existing launcher registration selected, unless the command line
-    sets the tasks. This runs in silent installs too. }
-  if (CurPageID = wpSelectTasks) and not LauncherChecked then begin
-    LauncherChecked := True;
-    if RegKeyExists(HKLM32, '{#LauncherKey}') and not HasParamPrefix('/TASKS=') and
-      not HasParamPrefix('/MERGETASKS=') then
-      WizardSelectTasks('launcher');
+  { Keep an existing launcher registration, and the tray's "Start at sign-in",
+    unless the command line sets the tasks. This runs in silent installs too. }
+  if (CurPageID = wpSelectTasks) and not TasksChecked then begin
+    TasksChecked := True;
+    if not HasParamPrefix('/TASKS=') and not HasParamPrefix('/MERGETASKS=') then begin
+      if RegKeyExists(HKLM32, '{#LauncherKey}') then
+        WizardSelectTasks('launcher');
+      if LoadStringFromFile(ExpandConstant('{commonappdata}\ufsmount\start-at-sign-in'), SignIn) then
+        if SignIn = '1' then
+          WizardSelectTasks('logon')
+        else if SignIn = '0' then
+          WizardSelectTasks('!logon');
+    end;
   end;
 end;
 

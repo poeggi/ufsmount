@@ -6,12 +6,14 @@
 //! the elevated scheduled task, or asks for elevation. The task-started tray
 //! (`--from-task`) takes no other input.
 
+mod about;
 mod instance;
 pub mod log;
 mod path;
 pub mod sys;
 pub mod task;
 mod ui;
+mod update;
 pub mod worker;
 
 use std::ffi::OsString;
@@ -73,7 +75,7 @@ fn parse_os(args: impl IntoIterator<Item = OsString>) -> Result<Mode, String> {
 
 fn fail(text: &str) -> ExitCode {
     ::log::error!("{text}");
-    sys::message_box(HWND::default(), text, true);
+    sys::error_box(HWND::default(), text);
     ExitCode::FAILURE
 }
 

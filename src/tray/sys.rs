@@ -28,8 +28,8 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetShellWindow, GetWindowThreadProcessId, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
-    MB_SETFOREGROUND, MessageBoxW, SW_SHOWNORMAL,
+    GetShellWindow, GetWindowThreadProcessId, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW,
+    SW_SHOWNORMAL,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
@@ -356,22 +356,15 @@ pub fn relaunch_elevated() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("cannot start ufsmount as administrator: {e}"))
 }
 
-/// A message box. `owner` may be null.
-pub fn message_box(owner: HWND, text: &str, error: bool) {
-    let style = MB_OK
-        | MB_SETFOREGROUND
-        | if error {
-            MB_ICONERROR
-        } else {
-            MB_ICONINFORMATION
-        };
+/// An error message box. `owner` may be null.
+pub fn error_box(owner: HWND, text: &str) {
     // SAFETY: the strings live through the call.
     unsafe {
         MessageBoxW(
             Some(owner),
             &HSTRING::from(text),
             &HSTRING::from("ufsmount"),
-            style,
+            MB_OK | MB_SETFOREGROUND | MB_ICONERROR,
         );
     }
 }

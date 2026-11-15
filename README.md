@@ -41,7 +41,8 @@ Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
 - Every UFS2 file system is mounted: U: first, then T:, S: and so on.
 - Plugging in a disk mounts it. Unplugging unmounts it.
 - Right-click the icon: Open or Unmount a drive, Rescan disks, Quit (unmounts all).
-- The setup can start it at every sign-in.
+- "Start at sign-in" in that menu starts it at every sign-in. The setup has the same choice.
+- About shows the versions and asks GitHub once whether a newer release exists. Nothing is downloaded.
 - Log: `C:\ProgramData\ufsmount\tray\tray.log`.
 
 ## Command line

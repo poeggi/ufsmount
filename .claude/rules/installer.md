@@ -7,7 +7,9 @@
 - WinFsp is installed when missing or older. The MSI is copied from next to the setup, or downloaded, into `{tmp}`,
   checked by SHA-256 and run there. It is ready before the tray is stopped. WinFsp stays on uninstall.
 - An unticked PATH or launcher task on an upgrade removes that PATH entry or registration.
-  `/TASKS=` or `/MERGETASKS=` on the command line win over the preselected launcher task.
+- On an upgrade the launcher task is preselected when registered, and the logon task as
+  `<ProgramData>\ufsmount\start-at-sign-in` says ("1" or "0", written with each task).
+  The tray's "Start at sign-in" changes it. `/TASKS=` or `/MERGETASKS=` win over both.
 - An older version over a newer one asks first. Silent installs need `/ALLOWDOWNGRADE` for it.
 - PATH is edited by `ufsmount-tray --add-to-path` and `--remove-from-path`, which keep the registry type.
   Pascal script cannot read that type.
@@ -30,4 +32,9 @@
 - A disk arrival forgets which removable-media disks (card readers) held no UFS, so a swapped card is
   probed again. Fixed disks are not probed again: that would wake a sleeping disk.
 - A mount the user unmounted stays unmounted until the disk is plugged in again or "Rescan" is clicked.
+- "Start at sign-in" is shown when `start-at-sign-in` can be read; a task changed by hand
+  shows wrong until the next toggle or setup run.
+- About is a TaskDialog (Common Controls 6 via the manifest; comctl32.dll is delay-loaded, so
+  other targets start without it). Versions come from Cargo.lock and rustc through build.rs.
+  The footer icons are drawn at run time for the dialog's DPI.
 - The icon is loaded for the DPI of the taskbar's monitor and loaded again on DPI and display changes.

@@ -55,6 +55,8 @@ pub enum Cmd {
     Unmount(u64),
     /// The watcher found the disk of this mount gone.
     Gone(u64),
+    /// Start the tray at sign-in, or not.
+    SignIn(bool),
     /// Unmount everything and end; the sender is told when done.
     Quit(Sender<()>),
 }
@@ -75,6 +77,8 @@ pub struct Snapshot {
     pub notes: Vec<Note>,
     /// Shown in the tooltip when no drive is mounted.
     pub status: String,
+    /// Whether the task starts the tray at sign-in; None when not known.
+    pub sign_in: Option<bool>,
 }
 
 /// State shared with the UI thread. `notify` wakes the UI.
@@ -210,6 +214,7 @@ struct Worker {
     retry: bool,
     retries_left: u8,
     user_sid: Option<String>,
+    sign_in: Option<bool>,
 }
 
 impl Worker {
@@ -235,6 +240,7 @@ impl Worker {
             retry: false,
             retries_left: RETRIES,
             user_sid: None,
+            sign_in: None,
         }
     }
 
@@ -271,6 +277,7 @@ impl Worker {
             let extra = snap.notes.len().saturating_sub(MAX_NOTES);
             snap.notes.drain(..extra);
             snap.status = self.status.clone();
+            snap.sign_in = self.sign_in;
         }
         (self.shared.notify)();
     }
@@ -508,12 +515,17 @@ impl Worker {
                 }
             }
             Cmd::Gone(id) => self.gone(id),
+            Cmd::SignIn(on) => match task::install(on) {
+                Ok(()) => self.sign_in = task::starts_at_sign_in(),
+                Err(e) => self.note("Start at sign-in", format!("{e:#}"), true),
+            },
             Cmd::Quit(done) => return Some(done),
         }
         None
     }
 
     fn run(mut self, rx: Receiver<Cmd>) {
+        self.sign_in = task::starts_at_sign_in();
         self.guard(|w| w.scan(false));
         if self.actives.is_empty() && self.notes.is_empty() {
             self.note(

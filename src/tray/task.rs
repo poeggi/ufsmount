@@ -126,6 +126,21 @@ pub fn check_install_dir() -> anyhow::Result<PathBuf> {
     Ok(exe)
 }
 
+/// `"1"` or `"0"`: whether the task starts the tray at sign-in. The tray menu
+/// shows it; the setup reads it to keep the choice on an upgrade.
+fn sign_in_file() -> anyhow::Result<PathBuf> {
+    Ok(base_dir()?.join("start-at-sign-in"))
+}
+
+/// Whether the task starts the tray at sign-in. None when not known.
+pub fn starts_at_sign_in() -> Option<bool> {
+    match std::fs::read(sign_in_file().ok()?).ok()?.as_slice() {
+        b"1" => Some(true),
+        b"0" => Some(false),
+        _ => None,
+    }
+}
+
 /// Create (or replace) the task for the session user, and the data folders.
 pub fn install(logon: bool) -> anyhow::Result<()> {
     anyhow::ensure!(is_elevated(), "needs administrator rights");
@@ -160,6 +175,10 @@ pub fn install(logon: bool) -> anyhow::Result<()> {
     let code = code?;
     anyhow::ensure!(code == 0, "schtasks /Create failed with exit code {code}");
     log::info!("task {TASK_NAME} created for {sid} (start at logon: {logon})");
+    let file = sign_in_file()?;
+    if let Err(e) = std::fs::write(&file, if logon { "1" } else { "0" }) {
+        log::warn!("{}: {e}", file.display());
+    }
     Ok(())
 }
 

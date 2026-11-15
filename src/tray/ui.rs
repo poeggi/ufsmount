@@ -29,17 +29,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_VOLUME,
     DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HDR, DEVICE_NOTIFY_WINDOW_HANDLE,
     DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW,
-    GetMessageW, HICON, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR, LoadImageW, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
-    RegisterDeviceNotificationW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow,
-    SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_ENDSESSION, WM_NULL, WM_QUERYENDSESSION, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    GetMessageW, HICON, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_GRAYED,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MSGFLT_ALLOW, PostMessageW,
+    PostQuitMessage, RegisterClassW, RegisterDeviceNotificationW, RegisterWindowMessageW,
+    SM_CXSMICON, SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_DEVICECHANGE,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_NULL, WM_QUERYENDSESSION, WM_TIMER,
+    WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
+use super::about;
 use super::instance::Instance;
-use super::sys::{message_box, open_unelevated};
+use super::sys::open_unelevated;
 use super::worker::{self, Cmd, Shared, Snapshot};
 use crate::security::SecurityDescriptor;
 
@@ -54,20 +56,13 @@ const TIMER_ADD_ICON: usize = 1;
 const ID_RESCAN: u32 = 10;
 const ID_ABOUT: u32 = 11;
 const ID_QUIT: u32 = 12;
+const ID_SIGN_IN: u32 = 13;
 const ID_MOUNTS: u32 = 100;
-
-const ABOUT: &str = concat!(
-    "ufsmount ",
-    env!("CARGO_PKG_VERSION"),
-    "\n\nMounts FreeBSD UFS2 disks read-only.\n\n",
-    "Uses WinFsp by Bill Zissimopoulos, rufs / fuse-ufs by Benjamin Stuerz and\n",
-    "contributors, and winfsp-rs by SnowflakePowered and contributors.\n\n",
-    "License: AGPL-3.0-or-later. Source: github.com/poeggi/winfsp-ufs"
-);
 
 enum Action {
     Open(String),
     Unmount(u64),
+    SignIn(bool),
 }
 
 struct App {
@@ -387,6 +382,16 @@ fn track_menu(hwnd: HWND, snap: &Snapshot, x: i32, y: i32) -> Option<(u32, Vec<(
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, ID_RESCAN as usize, w!("Rescan disks"));
+        if let Some(on) = snap.sign_in {
+            let check = if on { MF_CHECKED } else { MF_UNCHECKED };
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | check,
+                ID_SIGN_IN as usize,
+                w!("Start at sign-in"),
+            );
+            actions.push((ID_SIGN_IN, Action::SignIn(!on)));
+        }
         let _ = AppendMenuW(menu, MF_STRING, ID_ABOUT as usize, w!("About"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, ID_QUIT as usize, w!("Quit"));
@@ -414,7 +419,7 @@ fn act(hwnd: HWND, cmd: u32, actions: Vec<(u32, Action)>) {
         ID_RESCAN => send(Cmd::Rescan { manual: true }),
         ID_ABOUT => {
             if with_app(|a| std::mem::replace(&mut a.about_open, true)) == Some(false) {
-                message_box(hwnd, ABOUT, false);
+                about::show(hwnd);
                 with_app(|a| a.about_open = false);
             }
         }
@@ -427,6 +432,7 @@ fn act(hwnd: HWND, cmd: u32, actions: Vec<(u32, Action)>) {
                 }
             }
             Some(Action::Unmount(id)) => send(Cmd::Unmount(id)),
+            Some(Action::SignIn(on)) => send(Cmd::SignIn(on)),
             None => {}
         },
     }

@@ -528,12 +528,22 @@ pub fn load_winfsp() -> anyhow::Result<FspInit> {
         .map_err(|e| anyhow::anyhow!(e))
 }
 
-fn load_winfsp_once() -> anyhow::Result<FspInit> {
+fn winfsp_dll() -> anyhow::Result<HSTRING> {
     let dir = winfsp_install_dir()?;
-    let dll = HSTRING::from(format!(
+    Ok(HSTRING::from(format!(
         r"{}\bin\winfsp-x64.dll",
         dir.trim_end_matches('\\')
-    ));
+    )))
+}
+
+/// The version of the installed WinFsp, such as "2.2.26286".
+pub fn winfsp_version() -> anyhow::Result<String> {
+    let (major, minor, build, _) = file_version(&winfsp_dll()?)?;
+    Ok(format!("{major}.{minor}.{build}"))
+}
+
+fn load_winfsp_once() -> anyhow::Result<FspInit> {
+    let dll = winfsp_dll()?;
     let (major, minor, build, _) = file_version(&dll)?;
     anyhow::ensure!(
         (major, minor, build) >= MIN_WINFSP,

@@ -16,6 +16,9 @@ Raw disk reads and global drive letters need admin rights. The tray and the laun
 - Install path (`--install-task`, `--from-task`, `register`): the exe lies under Program Files
   (`FOLDERID_ProgramFiles`), and every folder below Program Files and the exe are admin-only, no reparse points.
 - Admin-only checks count every allow ACE type (plain, object, callback) as granting.
+- About's update check: one HEAD request to github.com over WinHTTP, redirects not followed.
+  Only the version number in the redirect target is read. Its links open only our two fixed URLs,
+  unelevated like "Open".
 - `--source <image>` (tests) needs an elevated caller and is refused with `--from-task`.
 
 ## Scheduled task `ufsmount-tray`
@@ -23,7 +26,7 @@ Raw disk reads and global drive letters need admin rights. The tray and the laun
 - Action: the literal exe path with `--from-task`. Callers cannot add arguments.
   A path with `%` is refused: Task Scheduler expands variables in the command.
 - Created and removed by `ufsmount-tray --install-task [--logon]` and `--remove-task`,
-  through `schtasks.exe` by its full System32 path.
+  through `schtasks.exe` by its full System32 path. The tray's "Start at sign-in" recreates it the same way.
 
 ## Single instance
 - `Global\ufsmount-tray` mutex: any authenticated user may wait on it.

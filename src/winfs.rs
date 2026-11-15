@@ -451,10 +451,12 @@ impl FileSystemContext for UfsFs {
 }
 
 /// Look up DLLs only in System32 and in explicitly given directories.
+/// Exits the process if that fails. Call it first, before any DLL is loaded.
 pub fn harden_dll_search() {
     // SAFETY: plain process-wide setting.
     if let Err(e) = unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) } {
-        log::warn!("SetDefaultDllDirectories failed: {e}");
+        eprintln!("error: SetDefaultDllDirectories failed: {e}");
+        std::process::exit(1);
     }
 }
 

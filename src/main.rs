@@ -196,12 +196,14 @@ fn main() -> ExitCode {
     winfs::harden_dll_search();
     let cli = Cli::parse();
     let level = match cli.verbose {
-        0 => "warn",
-        1 => "info",
-        2 => "debug",
-        _ => "trace",
+        0 => log::LevelFilter::Warn,
+        1 => log::LevelFilter::Info,
+        2 => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Trace,
     };
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level))
+    // Not from RUST_LOG: launcher mode and admin shells run elevated.
+    env_logger::Builder::new()
+        .filter_level(level)
         .format_timestamp_secs()
         .init();
     match run(cli) {

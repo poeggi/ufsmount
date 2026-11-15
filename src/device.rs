@@ -36,7 +36,6 @@ const ERROR_HANDLE_EOF: u32 = 38;
 const ERROR_DEV_NOT_EXIST: u32 = 55;
 const ERROR_NO_SUCH_DEVICE: u32 = 433;
 const ERROR_MEDIA_CHANGED: u32 = 1110;
-const ERROR_IO_DEVICE: u32 = 1117;
 const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
 const ERROR_DEVICE_REMOVED: u32 = 1617;
 
@@ -63,11 +62,12 @@ impl DeviceError {
         )
     }
 
-    /// The data on the medium is unreadable (bad sector).
+    /// The data on the medium is unreadable (bad sector). ERROR_IO_DEVICE is
+    /// not one: USB bridges also report it for a reset or an unplug.
     pub fn is_media_error(&self) -> bool {
         matches!(
             self.code,
-            ERROR_CRC | ERROR_SECTOR_NOT_FOUND | ERROR_READ_FAULT | ERROR_IO_DEVICE
+            ERROR_CRC | ERROR_SECTOR_NOT_FOUND | ERROR_READ_FAULT
         )
     }
 }
@@ -228,6 +228,11 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// A sector size reads and partition tables can use: [`CHUNK`] is a multiple of it.
+fn supported_sector(size: u64) -> bool {
+    size.is_power_of_two() && (512..=4096).contains(&size)
+}
+
 /// A disk or image, opened read-only.
 pub struct Device {
     raw: Box<dyn RawDisk>,
@@ -273,9 +278,13 @@ impl Device {
             (file.metadata()?.len(), 512)
         };
         anyhow::ensure!(len > 0, "{path} is empty");
+        anyhow::ensure!(
+            supported_sector(io_sector),
+            "{path}: unsupported sector size {io_sector} reported by the disk"
+        );
         let table_sector = sector_override.map(u64::from).unwrap_or(io_sector);
         anyhow::ensure!(
-            table_sector.is_power_of_two() && (512..=4096).contains(&table_sector),
+            supported_sector(table_sector),
             "unsupported sector size {table_sector}"
         );
         let mut dev = Device::from_raw(Box::new(OsDisk { file, is_disk }), path, len, io_sector);
@@ -343,11 +352,18 @@ impl Device {
         lock(&self.last_error).take()
     }
 
-    fn fail(&self, code: u32, offset: u64) -> io::Error {
+    /// The code of a failed raw read, or ERROR_DEVICE_NOT_CONNECTED when the
+    /// disk no longer answers. Asked before an error is remembered as a bad sector.
+    fn read_error(&self, code: u32, offset: u64) -> DeviceError {
         let mut err = DeviceError { code, offset };
-        if !err.is_gone() && !err.is_media_error() && !self.raw.is_alive() {
+        if !err.is_gone() && !self.raw.is_alive() {
             err.code = ERROR_DEVICE_NOT_CONNECTED;
         }
+        err
+    }
+
+    fn fail(&self, code: u32, offset: u64) -> io::Error {
+        let err = DeviceError { code, offset };
         if err.is_gone() && !self.gone.swap(true, Ordering::Relaxed) {
             log::error!("{}: the disk is gone ({err})", self.name);
         }
@@ -405,12 +421,9 @@ impl Device {
                 Ok(Some(data))
             }
             Err(code) => {
-                let err = DeviceError {
-                    code,
-                    offset: start,
-                };
+                let err = self.read_error(code, start);
                 if err.is_gone() {
-                    return Err(self.fail(code, start));
+                    return Err(self.fail(err.code, start));
                 }
                 log::warn!(
                     "{}: chunk at byte {start} failed ({err}), reading sector by sector",
@@ -438,15 +451,12 @@ impl Device {
             }
             let data = &mut buf.as_mut_slice()[..s_len];
             if let Err(code) = self.raw.read_exact_at(s_start, data) {
-                let err = DeviceError {
-                    code,
-                    offset: s_start,
-                };
+                let err = self.read_error(code, s_start);
                 if err.is_media_error() {
                     log::error!("{}: unreadable sector {s} (byte {s_start})", self.name);
-                    lock(&self.bad_sectors).insert(s, code);
+                    lock(&self.bad_sectors).insert(s, err.code);
                 }
-                return Err(self.fail(code, s_start));
+                return Err(self.fail(err.code, s_start));
             }
             let lo = offset.max(s_start);
             let hi = (offset + dst.len() as u64).min(s_start + s_len as u64);
@@ -640,6 +650,8 @@ mod tests {
     use super::testing::FakeDisk;
     use super::*;
 
+    const ERROR_IO_DEVICE: u32 = 1117;
+
     fn pattern(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i * 7 % 251) as u8).collect()
     }
@@ -718,6 +730,49 @@ mod tests {
         assert!(!dev.is_gone());
         assert!(lock(&dev.bad_sectors).is_empty());
         assert!(lock(&dev.bad_chunks).is_empty());
+    }
+
+    #[test]
+    fn io_device_error_is_not_remembered() {
+        let mut disk = FakeDisk::new(pattern(2 * CHUNK as usize), 512);
+        disk.bad.push((0..512, ERROR_IO_DEVICE));
+        let reads = disk.reads.clone();
+        let dev = disk.into_device();
+        let mut buf = vec![0; 10];
+        let err = dev.read(0, &mut buf).unwrap_err();
+        assert!(!device_error(&err).unwrap().is_media_error());
+        assert!(!dev.is_gone());
+        assert!(lock(&dev.bad_sectors).is_empty());
+        assert!(lock(&dev.bad_chunks).is_empty());
+        let before = reads.load(Ordering::Relaxed);
+        assert!(dev.read(0, &mut buf).is_err());
+        assert!(reads.load(Ordering::Relaxed) > before, "read again");
+    }
+
+    #[test]
+    fn media_error_on_a_dead_device_means_gone() {
+        for code in [ERROR_CRC, ERROR_IO_DEVICE] {
+            let mut disk = FakeDisk::new(pattern(2 * CHUNK as usize), 512);
+            disk.bad.push((0..CHUNK, code));
+            disk.unplug_after = Some(1);
+            let dev = disk.into_device();
+            let mut buf = vec![0; 10];
+            let err = dev.read(0, &mut buf).unwrap_err();
+            assert!(device_error(&err).unwrap().is_gone(), "code {code}");
+            assert!(dev.is_gone());
+            assert!(lock(&dev.bad_sectors).is_empty());
+            assert!(lock(&dev.bad_chunks).is_empty());
+        }
+    }
+
+    #[test]
+    fn sector_sizes() {
+        for ok in [512, 1024, 2048, 4096] {
+            assert!(supported_sector(ok));
+        }
+        for bad in [0, 1, 256, 520, 3072, 8192] {
+            assert!(!supported_sector(bad), "{bad}");
+        }
     }
 
     #[test]

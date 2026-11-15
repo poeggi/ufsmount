@@ -71,7 +71,8 @@ fn content() -> String {
          - winfsp-rs {} by SnowflakePowered\n\
          - Rust {}\n\
          Runs on: {winfsp}\n\n\
-         License: AGPL-3.0-or-later. Source: <a href=\"{SOURCE_URL}\">github.com/poeggi/winfsp-ufs</a>",
+         License: AGPL-3.0-or-later\n\
+         Source: <a href=\"{SOURCE_URL}\">github.com/poeggi/winfsp-ufs</a>",
         env!("UFSMOUNT_RUFS"),
         env!("UFSMOUNT_WINFSP_RS"),
         env!("UFSMOUNT_RUST"),

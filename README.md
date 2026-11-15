@@ -27,6 +27,9 @@ The setup is not signed yet:
 
 Silent install: `ufsmount-<version>-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
 
+An older version over a newer one asks first.
+A silent install with `/SUPPRESSMSGBOXES` stops there; add `/ALLOWDOWNGRADE` to install it anyway.
+
 Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
 
 ## Start and stop
@@ -100,7 +103,7 @@ cargo test
 The WinFsp mount test runs with `UFSMOUNT_MOUNT_TEST=1`.
 
 The setup needs [Inno Setup](https://jrsoftware.org/isinfo.php) 7.1.1:
-`ISCC /DAppVersion=0.2.0 installer\ufsmount.iss`. It goes to `target\installer`.
+`ISCC /DAppVersion=0.2.1 installer\ufsmount.iss`. It goes to `target\installer`.
 
 ## Credits
 

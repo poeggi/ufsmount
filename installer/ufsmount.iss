@@ -7,8 +7,11 @@
   #define AppVersion "0.0.0"
 #endif
 
+#define AppGuid "9A3E6C51-2F4B-4E8D-9C27-5B1D3F0A8E64"
+#define UninstallKey "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{" + AppGuid + "}_is1"
+
 [Setup]
-AppId={{9A3E6C51-2F4B-4E8D-9C27-5B1D3F0A8E64}
+AppId={{{#AppGuid}}
 AppName=ufsmount
 AppVersion={#AppVersion}
 AppVerName=ufsmount {#AppVersion}
@@ -186,6 +189,40 @@ begin
 end;
 
 { --- setup steps --- }
+
+function HasParam(const Name: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), Name) = 0 then
+      Result := True;
+end;
+
+{ Installing an older version over a newer one needs a Yes, or /ALLOWDOWNGRADE
+  when message boxes are suppressed. }
+function InitializeSetup: Boolean;
+var
+  Installed: String;
+  Have, Mine: Int64;
+begin
+  Result := True;
+  if not RegQueryStringValue(HKLM64, '{#UninstallKey}', 'DisplayVersion', Installed) then
+    exit;
+  if not StrToVersion(Installed, Have) or not StrToVersion('{#AppVersion}', Mine) then begin
+    Log('Version check skipped: installed version ' + Installed);
+    exit;
+  end;
+  if ComparePackedVersion(Mine, Have) >= 0 then
+    exit;
+  Log(Format('Downgrade from %s to {#AppVersion}', [Installed]));
+  if HasParam('/ALLOWDOWNGRADE') then
+    exit;
+  Result := SuppressibleMsgBox(Format('ufsmount %s is installed. This setup has the older ' +
+    'version {#AppVersion}.' + #13#10#13#10 + 'Install the older version anyway?', [Installed]),
+    mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
+end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin

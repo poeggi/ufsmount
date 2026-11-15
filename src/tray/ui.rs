@@ -12,9 +12,13 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromWindow};
 use windows::Win32::System::Ioctl::GUID_DEVINTERFACE_DISK;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects};
+use windows::Win32::UI::HiDpi::{
+    GetDpiForMonitor, GetDpiForSystem, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI,
+};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_WARNING, NIM_ADD,
     NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
@@ -24,13 +28,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW,
     DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_VOLUME,
     DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HDR, DEVICE_NOTIFY_WINDOW_HANDLE,
-    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GetMessageW, GetSystemMetrics,
-    HICON, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR, LoadImageW, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
-    RegisterDeviceNotificationW, RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON,
-    SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_DEVICECHANGE, WM_ENDSESSION, WM_NULL,
-    WM_QUERYENDSESSION, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW,
+    GetMessageW, HICON, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR, LoadImageW, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
+    RegisterDeviceNotificationW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow,
+    SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_ENDSESSION, WM_NULL, WM_QUERYENDSESSION, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -69,6 +73,8 @@ enum Action {
 struct App {
     hwnd: HWND,
     icon: HICON,
+    /// The DPI `icon` was loaded for.
+    dpi: u32,
     tx: Sender<Cmd>,
     shared: Arc<Shared>,
     taskbar_created: u32,
@@ -112,12 +118,81 @@ fn tooltip(snap: &Snapshot) -> String {
     }
 }
 
-fn add_icon(app: &mut App) -> bool {
-    let tip = tooltip(&app.shared.snap.lock().unwrap_or_else(|e| e.into_inner()));
-    let mut nid = icon_data(app.hwnd);
+/// The notification area is on the taskbar of the primary display. Its icons
+/// follow that monitor's DPI, which can change without a new sign-in.
+fn taskbar_dpi() -> u32 {
+    // SAFETY: plain calls; without a taskbar window the primary monitor is used.
+    unsafe {
+        let taskbar = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()).unwrap_or_default();
+        let monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTOPRIMARY);
+        let (mut x, mut y) = (0, 0);
+        match GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) {
+            Ok(()) if x > 0 => x,
+            _ => GetDpiForSystem(),
+        }
+    }
+}
+
+/// The app icon at `size` pixels; the caller owns the handle.
+fn load_icon(size: i32) -> HICON {
+    // SAFETY: resource 1 is the app icon.
+    unsafe {
+        let Ok(hinst) = GetModuleHandleW(None) else {
+            return HICON::default();
+        };
+        LoadImageW(
+            Some(hinst.into()),
+            PCWSTR(std::ptr::without_provenance(1)), // MAKEINTRESOURCE(1)
+            IMAGE_ICON,
+            size,
+            size,
+            LR_DEFAULTCOLOR,
+        )
+        .map(|h| HICON(h.0))
+        .unwrap_or_default()
+    }
+}
+
+/// Load the icon again if the taskbar's DPI changed. True if it did.
+fn reload_icon() -> bool {
+    let dpi = taskbar_dpi();
+    if with_app(|a| a.dpi == dpi && !a.icon.is_invalid()).unwrap_or(true) {
+        return false;
+    }
+    // SAFETY: plain call.
+    let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) };
+    let icon = load_icon(size);
+    if icon.is_invalid() {
+        log::warn!("cannot load the icon at {size} px");
+        return false;
+    }
+    log::info!("icon: {size} px for {dpi} dpi");
+    let old = with_app(|a| {
+        a.dpi = dpi;
+        std::mem::replace(&mut a.icon, icon)
+    });
+    if let Some(old) = old.filter(|h| !h.is_invalid()) {
+        // SAFETY: our own icon; the shell keeps a copy of the one it shows.
+        let _ = unsafe { DestroyIcon(old) };
+    }
+    true
+}
+
+/// Add the icon, or update it if it is there already. Shell calls run outside
+/// `with_app`: while Shell_NotifyIconW waits for the taskbar, messages sent to
+/// this thread are dispatched.
+fn add_icon() -> bool {
+    reload_icon();
+    let Some((hwnd, icon, tip)) = with_app(|a| {
+        let tip = tooltip(&a.shared.snap.lock().unwrap_or_else(|e| e.into_inner()));
+        (a.hwnd, a.icon, tip)
+    }) else {
+        return false;
+    };
+    let mut nid = icon_data(hwnd);
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
     nid.uCallbackMessage = WM_TRAY;
-    nid.hIcon = app.icon;
+    nid.hIcon = icon;
     copy_str(&mut nid.szTip, &tip);
     // SAFETY: nid is fully initialised.
     let mut ok = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) }.as_bool();
@@ -131,8 +206,25 @@ fn add_icon(app: &mut App) -> bool {
         // SAFETY: as above.
         let _ = unsafe { Shell_NotifyIconW(NIM_SETVERSION, &nid) };
     }
-    app.added = ok;
+    with_app(|a| a.added = ok);
     ok
+}
+
+/// A DPI or display change: show the icon at the new size.
+fn on_dpi_change() {
+    if !reload_icon() {
+        return;
+    }
+    let Some((hwnd, icon, added)) = with_app(|a| (a.hwnd, a.icon, a.added)) else {
+        return;
+    };
+    if added {
+        let mut nid = icon_data(hwnd);
+        nid.uFlags = NIF_ICON;
+        nid.hIcon = icon;
+        // SAFETY: nid is fully initialised.
+        let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
+    }
 }
 
 fn set_tip(hwnd: HWND, tip: &str) {
@@ -329,7 +421,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_ADD_ICON => {
-            if with_app(add_icon) == Some(true) {
+            if add_icon() {
                 // SAFETY: our own timer.
                 let _ = unsafe { KillTimer(Some(hwnd), TIMER_ADD_ICON) };
                 on_state();
@@ -353,6 +445,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             LRESULT(1)
         }
+        WM_DPICHANGED | WM_DISPLAYCHANGE => {
+            on_dpi_change();
+            LRESULT(0)
+        }
         WM_QUERYENDSESSION => LRESULT(1),
         WM_ENDSESSION => {
             if wparam.0 != 0 {
@@ -368,7 +464,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         m if m != 0 && m == taskbar_created => {
             // Explorer restarted (the icon is gone) or the DPI changed.
-            if with_app(add_icon) == Some(true) {
+            if add_icon() {
                 on_state();
             } else {
                 // SAFETY: our own window.
@@ -381,7 +477,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
     }
 }
 
-fn create_window() -> anyhow::Result<(HWND, HICON)> {
+fn create_window() -> anyhow::Result<HWND> {
     // SAFETY: standard window class registration and creation.
     unsafe {
         let hinst = GetModuleHandleW(None)?;
@@ -407,17 +503,7 @@ fn create_window() -> anyhow::Result<(HWND, HICON)> {
             Some(hinst.into()),
             None,
         )?;
-        let icon = LoadImageW(
-            Some(hinst.into()),
-            PCWSTR(std::ptr::without_provenance(1)), // MAKEINTRESOURCE(1)
-            IMAGE_ICON,
-            GetSystemMetrics(SM_CXSMICON),
-            GetSystemMetrics(SM_CYSMICON),
-            LR_DEFAULTCOLOR,
-        )
-        .map(|h| HICON(h.0))
-        .unwrap_or_default();
-        Ok((hwnd, icon))
+        Ok(hwnd)
     }
 }
 
@@ -442,7 +528,7 @@ fn watch_devices(hwnd: HWND) {
 
 /// Run the tray until Quit, the quit event or session end.
 pub fn run(inst: Instance, source: Option<PathBuf>, sd: SecurityDescriptor) -> ExitCode {
-    let (hwnd, icon) = match create_window() {
+    let hwnd = match create_window() {
         Ok(x) => x,
         Err(e) => {
             log::error!("cannot create the window: {e:#}");
@@ -478,7 +564,8 @@ pub fn run(inst: Instance, source: Option<PathBuf>, sd: SecurityDescriptor) -> E
     APP.with(|a| {
         *a.borrow_mut() = Some(App {
             hwnd,
-            icon,
+            icon: HICON::default(),
+            dpi: 0,
             tx,
             shared,
             taskbar_created,
@@ -487,7 +574,7 @@ pub fn run(inst: Instance, source: Option<PathBuf>, sd: SecurityDescriptor) -> E
             menu_open: false,
         })
     });
-    if with_app(add_icon) != Some(true) {
+    if !add_icon() {
         log::warn!("the notification area is not ready; retrying");
         // SAFETY: our own window.
         unsafe { SetTimer(Some(hwnd), TIMER_ADD_ICON, 2000, None) };

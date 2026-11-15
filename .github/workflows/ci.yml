@@ -94,6 +94,17 @@ jobs:
           & "$env:RUNNER_TEMP\inno\ISCC.exe" /Q "/DAppVersion=${{ steps.version.outputs.version }}" installer\ufsmount.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
 
+      - name: Build an older setup for the downgrade test
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\inno\ISCC.exe" /Q /DAppVersion=0.0.1 "/O$env:RUNNER_TEMP\old-setup" installer\ufsmount.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: downgrade-test
+          path: ${{ runner.temp }}/old-setup/ufsmount-0.0.1-setup.exe
+
       - uses: actions/upload-artifact@v7
         with:
           name: ufsmount
@@ -116,6 +127,11 @@ jobs:
         with:
           name: ufsmount
           path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: downgrade-test
+          path: old
 
       - name: Install, use and uninstall
         shell: pwsh
@@ -148,6 +164,19 @@ jobs:
           if ($s.ExecutionTimeLimit -ne 'PT0S' -or $s.Priority -ne '4' -or $s.DisallowStartIfOnBatteries -ne 'false' -or $s.MultipleInstancesPolicy -ne 'IgnoreNew') { throw 'task settings' }
           if ($task.Task.Actions.Exec.Command -ne "$app\ufsmount-tray.exe" -or $task.Task.Actions.Exec.Arguments -ne '--from-task') { throw 'task action' }
           if ($task.Task.Principals.Principal.RunLevel -ne 'HighestAvailable') { throw 'task run level' }
+
+          # Older over newer: refused when silent, done with /ALLOWDOWNGRADE.
+          function Installed { (Get-ItemProperty $uninstKey).DisplayVersion }
+          $current = Installed
+          $old = (Get-ChildItem old -Recurse -Filter 'ufsmount-0.0.1-setup.exe').FullName
+          $p = Start-Process $old -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$env:RUNNER_TEMP\downgrade1.log" -Wait -PassThru
+          if ($p.ExitCode -eq 0 -or (Installed) -ne $current) { throw "downgrade not refused: exit $($p.ExitCode), version $(Installed)" }
+          $p = Start-Process $old -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLOWDOWNGRADE', "/LOG=$env:RUNNER_TEMP\downgrade2.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0 -or (Installed) -ne '0.0.1') { throw "downgrade failed: exit $($p.ExitCode), version $(Installed)" }
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$env:RUNNER_TEMP\upgrade.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0 -or (Installed) -ne $current) { throw "upgrade failed: exit $($p.ExitCode), version $(Installed)" }
+          $n = @(((PathValue) -split '\|', 2)[1] -split ';' | Where-Object { $_ -eq $app }).Count
+          if ($n -ne 1) { throw "PATH has $n ufsmount entries" }
 
           zstd -q -d vendor/fuse-ufs/resources/ufs-little.img.zst -o "$env:RUNNER_TEMP\ufs.img"
           if ($LASTEXITCODE -ne 0) { throw "zstd failed: $LASTEXITCODE" }
@@ -192,7 +221,7 @@ jobs:
         if: failure()
         shell: pwsh
         run: |
-          $logs = "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\setup.log.winfsp.txt", "$env:RUNNER_TEMP\uninst.log", "$env:ProgramData\ufsmount\tray\tray.log"
+          $logs = "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\setup.log.winfsp.txt", "$env:RUNNER_TEMP\downgrade1.log", "$env:RUNNER_TEMP\downgrade2.log", "$env:RUNNER_TEMP\upgrade.log", "$env:RUNNER_TEMP\uninst.log", "$env:ProgramData\ufsmount\tray\tray.log"
           foreach ($l in $logs) {
             if (Test-Path $l) {
               Write-Host "===== $l"

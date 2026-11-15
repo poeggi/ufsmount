@@ -872,9 +872,13 @@ mod tests {
             sddl_of(&base),
             canonical(&format!("O:{me}D:P(A;OICI;FA;;;{me})"))
         );
+        // Children keep their access entries: nothing is pushed down to them.
+        // Windows may report entries the parent no longer passes on without
+        // the inherited flag (seen as the built-in Administrator).
+        let entries = |sddl: String| sddl.replace(";ID;", ";;");
         assert_eq!(
-            sddl_of(&child),
-            child_before,
+            entries(sddl_of(&child)),
+            entries(child_before),
             "children keep their security"
         );
 

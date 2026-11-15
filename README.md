@@ -103,7 +103,7 @@ cargo test
 The WinFsp mount test runs with `UFSMOUNT_MOUNT_TEST=1`.
 
 The setup needs [Inno Setup](https://jrsoftware.org/isinfo.php) 7.1.1:
-`ISCC /DAppVersion=0.2.1 installer\ufsmount.iss`. It goes to `target\installer`.
+`ISCC /DAppVersion=<version> installer\ufsmount.iss`. It goes to `target\installer`.
 
 ## Credits
 

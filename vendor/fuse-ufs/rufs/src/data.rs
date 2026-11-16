@@ -12,6 +12,10 @@ use bincode_next::{Decode, Encode};
 /// UFS2 fast filesystem magic number
 pub const FS_UFS2_MAGIC: i32 = 0x19540119;
 
+/// NetBSD's UFS2 with extended attributes (FFSv2ea): the UFS2 layout under
+/// another magic number, so that older kernels refuse it
+pub const FS_UFS2EA_MAGIC: i32 = 0x19012038;
+
 /// Offset of the magic number in the superblock
 pub const MAGIC_OFFSET: u64 = 1372;
 

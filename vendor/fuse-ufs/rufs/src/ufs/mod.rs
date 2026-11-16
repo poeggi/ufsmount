@@ -62,7 +62,8 @@ pub struct Info {
 	/// Size of the file system in fragments, metadata included (`fs_size`).
 	pub frags: u64,
 
-	/// The file system was unmounted cleanly (`fs_clean`).
+	/// The file system was unmounted cleanly (`fs_clean` is 1). NetBSD keeps 2
+	/// (`FS_WASCLEAN`) there while it is mounted.
 	pub clean: bool,
 
 	/// Status flags (`fs_flags`), as defined in FreeBSD's `ufs/ffs/fs.h`.
@@ -98,10 +99,10 @@ impl<R: Backend> Ufs<R> {
 		let mut magic = [0u8; 4];
 		file.read_exact(&mut magic)?;
 
-		// magic: 0x19 54 01 19
+		// magic: 0x19 54 01 19, or 0x19 01 20 38 (FFSv2ea)
 		let config = match magic {
-			[0x19, 0x01, 0x54, 0x19] => Config::little(),
-			[0x19, 0x54, 0x01, 0x19] => Config::big(),
+			[0x19, 0x01, 0x54, 0x19] | [0x38, 0x20, 0x01, 0x19] => Config::little(),
+			[0x19, 0x54, 0x01, 0x19] | [0x19, 0x01, 0x20, 0x38] => Config::big(),
 			_ => {
 				iobail!(
 					ErrorKind::InvalidInput,
@@ -114,7 +115,7 @@ impl<R: Backend> Ufs<R> {
 		let mut file = Decoder::new(file, config);
 
 		let superblock: Superblock = file.decode_at(SBLOCK_UFS2 as u64)?;
-		if superblock.magic != FS_UFS2_MAGIC {
+		if superblock.magic != FS_UFS2_MAGIC && superblock.magic != FS_UFS2EA_MAGIC {
 			iobail!(
 				ErrorKind::InvalidInput,
 				"invalid superblock magic number: {}",
@@ -155,7 +156,7 @@ impl<R: Backend> Ufs<R> {
 			bsize:   sb.bsize as u32,
 			fsize:   sb.fsize as u32,
 			frags:   sb.size as u64,
-			clean:   sb.clean != 0,
+			clean:   sb.clean == 1,
 			flags:   sb.flags as u32,
 			id:      [sb.id[0] as u32, sb.id[1] as u32],
 			volname: until_nul(&sb.volname),
@@ -230,7 +231,7 @@ impl<R: Backend> Ufs<R> {
 			for i in 0..sb.ncg {
 				let addr = (i as u64 * fpg + sblkno) * fs;
 				let csb: Superblock = self.file.decode_at(addr)?;
-				if csb.magic != FS_UFS2_MAGIC {
+				if csb.magic != sb.magic {
 					log::error!("CG{i} has invalid superblock magic: {:x}", csb.magic);
 					return Err(err!(EIO));
 				}
@@ -360,6 +361,32 @@ mod t {
 	/// The errno of opening a file system with the superblock `sb`.
 	fn open_errno(sb: &Superblock) -> Option<i32> {
 		open(image(sb)).err().and_then(|e| e.raw_os_error())
+	}
+
+	#[test]
+	fn ffsv2ea_magic() {
+		let mut sb = superblock();
+		sb.magic = FS_UFS2EA_MAGIC;
+		assert_eq!(open(image(&sb)).unwrap().info().frags, 256);
+		let mut big = vec![0u8; image(&sb).len()];
+		Decoder::new(Cursor::new(&mut big[..]), Config::big())
+			.encode_at(SBLOCK_UFS2 as u64, &sb)
+			.unwrap();
+		assert_eq!(open(big).unwrap().info().frags, 256);
+	}
+
+	/// NetBSD leaves `fs_clean` at 2 while mounted: a crash keeps it there.
+	#[test]
+	fn clean_flag() {
+		for (value, clean) in [(0, false), (1, true), (2, false)] {
+			let mut sb = superblock();
+			sb.clean = value;
+			assert_eq!(
+				open(image(&sb)).unwrap().info().clean,
+				clean,
+				"fs_clean {value}"
+			);
+		}
 	}
 
 	#[test]

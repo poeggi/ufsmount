@@ -61,7 +61,7 @@ pub trait Fs: Send {
     fn stat(&mut self, id: NodeId) -> io::Result<Stat>;
     /// Call `f` for each entry; `f` returns true to stop. `.` may be among them.
     /// `..` must be, naming the parent (the root's names the root): it is the
-    /// only source of parents, for `..` in paths and symlink targets.
+    /// only source of parents.
     fn read_dir(
         &mut self,
         dir: NodeId,

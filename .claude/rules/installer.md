@@ -23,10 +23,13 @@
   `InitializeWizard` gives every wizard list (components, tasks, run) more room through `Offset`.
   A new checkbox list must get the same. Fixed upstream in issrc commit 5b4c39b (after 7.1.1);
   update the pin in `ci.yml` once a release has it.
-- `products/ufsmount/logos/wizard/*.png` are rendered from `logos/logo.svg` at the sizes the help lists per DPI.
+- `products/ufsmount/logos/wizard/*.png` are rendered from `logos/logo.svg` at the sizes the help lists per DPI:
+  small ones fill the image, large ones hold a square of 70% of the width, centred at 38% of the height.
 - `products/ufsmount/logos/ufsmount.ico` (exe, tray and setup icon): 16-64 px from `logos/logo-small.svg`,
   a bold variant that stays readable in the tray; 256 px from `logos/logo.svg`. Both have a transparent
   background and a white drive with black "U:".
+- Icons fill their canvas like other apps' icons: `logo.svg`'s viewBox ends at the drawing, and 48 and 64 px
+  use `logo-small.svg` with viewBox `1.5 0.6 30.5 30.5`. 16-40 px keep the 32-unit grid, so they stay sharp.
 - The setup is unsigned: SmartScreen warns, Smart App Control blocks it.
 
 ## Tray (`crates/win-mountkit/src/tray`)

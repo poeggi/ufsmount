@@ -100,8 +100,8 @@ pub trait Backend: Sync {
         table
     }
 
-    /// What `cand` holds: usually nothing or one file system; a container (such
-    /// as APFS) may hold several. The file systems must fit on the disk.
+    /// What `cand` holds: usually nothing or one file system; a container may
+    /// hold several. The file systems must fit on the disk.
     fn probe(&self, dev: &Arc<Device>, cand: &Candidate) -> Vec<FsKind>;
 
     /// Open what `probe` found at `cand`.

@@ -182,8 +182,7 @@ jobs:
           $p = Start-Process $old -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLOWDOWNGRADE', "/LOG=$env:RUNNER_TEMP\downgrade2.log" -Wait -PassThru
           if ($p.ExitCode -ne 0 -or (Installed) -ne '0.0.1') { throw "downgrade failed: exit $($p.ExitCode), version $(Installed)" }
           # The tray's "Start at sign-in" survives an upgrade.
-          Set-Content -NoNewline "$env:ProgramData\ufsmount\start-at-sign-in" '1'
-          Write-Host "marker: [$(Get-Content -Raw "$env:ProgramData\ufsmount\start-at-sign-in")]"
+          Set-Content -Path "$env:ProgramData\ufsmount\start-at-sign-in" -Value '1' -NoNewline
           $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$env:RUNNER_TEMP\upgrade.log" -Wait -PassThru
           if ($p.ExitCode -ne 0 -or (Installed) -ne $current) { throw "upgrade failed: exit $($p.ExitCode), version $(Installed)" }
           [xml]$task = schtasks.exe /Query /TN ufsmount-tray /XML

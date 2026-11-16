@@ -47,16 +47,21 @@ fn main() {
     // TaskDialogIndirect is in Common Controls 6 only, which the tray's
     // manifest selects; other targets would fail to start on its import.
     println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
+    // LNK4199: a target that ends up with no imports from a delay-loaded DLL,
+    // such as the CLI once LTO drops the tray code.
+    println!("cargo:rustc-link-arg=/IGNORE:4199");
     // Static imports are searched in System32 only, never in the exe folder.
     println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=logos/ufsmount.ico");
     println!("cargo:rerun-if-changed=../../Cargo.lock");
 
-    // The rufs version, for the About box.
+    // The rufs and winfsp-rs versions, for the About box.
     let lock = std::fs::read_to_string("../../Cargo.lock").expect("read Cargo.lock");
     let rufs = locked_version(&lock, "rufs");
     println!("cargo:rustc-env=UFSMOUNT_RUFS={rufs}");
+    let winfsp = locked_version(&lock, "winfsp");
+    println!("cargo:rustc-env=UFSMOUNT_WINFSP_RS={winfsp}");
 
     // The logo as the icon (resource id 1, also used by the tray), plus version info.
     let mut cli = winresource::WindowsResource::new();

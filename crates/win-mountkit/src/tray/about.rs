@@ -63,6 +63,16 @@ fn source_url() -> String {
     format!("https://github.com/{}", product().repo)
 }
 
+/// "0.13.2+winfsp-2.1" as "0.13.2 (WinFsp 2.1 API)": the bindings are for
+/// the WinFsp 2.1 API.
+fn winfsp_rs() -> String {
+    let v = product().winfsp_rs;
+    match v.split_once("+winfsp-") {
+        Some((v, api)) => format!("{v} (WinFsp {api} API)"),
+        None => v.to_string(),
+    }
+}
+
 fn content() -> String {
     let p = product();
     let winfsp = match winfsp_version() {
@@ -80,7 +90,7 @@ fn content() -> String {
          Source: <a href=\"{}\">github.com/{}</a>",
         p.about,
         p.built_using,
-        env!("WINFSP_RS_VERSION"),
+        winfsp_rs(),
         env!("RUST_VERSION"),
         p.license,
         source_url(),
@@ -444,18 +454,12 @@ mod tests {
 
     #[test]
     fn versions_come_from_the_build() {
-        let lock = include_str!("../../../../Cargo.lock").replace("\r\n", "\n");
-        let (winfsp, api) = env!("WINFSP_RS_VERSION").split_once(" (WinFsp ").unwrap();
-        let api = api.trim_end_matches(" API)");
-        assert!(lock.contains(&format!(
-            "name = \"winfsp\"\nversion = \"{winfsp}+winfsp-{api}\"\n"
-        )));
         assert!(env!("RUST_VERSION").starts_with(|c: char| c.is_ascii_digit()));
         let text = content();
         for v in [
             "Mounts demo disks.",
             "- demo 1.0\n",
-            env!("WINFSP_RS_VERSION"),
+            "- winfsp-rs 0.13.2 (WinFsp 2.1 API) by",
             env!("RUST_VERSION"),
             "github.com/example/demo</a>",
         ] {

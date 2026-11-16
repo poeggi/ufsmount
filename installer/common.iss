@@ -217,6 +217,30 @@ begin
     Result := 'WinFsp is still missing or too old after its setup.';
 end;
 
+{ The mounted WinFsp drives, from WinFsp's fsptool: one line each, with the
+  drive letter and the volume device. Empty when there are none or fsptool fails. }
+function WinFspDrives: String;
+var
+  Dir: String;
+  Code, I: Integer;
+  Output: TExecOutput;
+begin
+  Result := '';
+  if not RegQueryStringValue(HKLM32, 'SOFTWARE\WinFsp', 'InstallDir', Dir) then
+    exit;
+  try
+    if not ExecAndCaptureOutput(AddBackslash(Dir) + 'bin\fsptool-x64.exe', 'lsvol', '',
+      SW_SHOWNORMAL, ewWaitUntilTerminated, Code, Output) or (Code <> 0) then
+      exit;
+  except
+    Log('fsptool: ' + GetExceptionMessage);
+    exit;
+  end;
+  for I := 0 to GetArrayLength(Output.StdOut) - 1 do
+    if Trim(Output.StdOut[I]) <> '' then
+      Result := Result + Trim(Output.StdOut[I]) + #13#10;
+end;
+
 { --- setup steps --- }
 
 function HasParam(const Name: String): Boolean;
@@ -326,11 +350,13 @@ begin
 end;
 
 { The MSI is in place before the tray and its mounts stop, so a failed
-  download leaves them running. }
+  download leaves them running. WinFsp drives still mounted after that, such
+  as other programs' drives, close with the WinFsp update or need a restart. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  NeedWinFsp: Boolean;
-  Msi: String;
+  NeedWinFsp, TrayRan: Boolean;
+  Msi, Drives, Tray: String;
+  Code: Integer;
 begin
   Result := '';
   NeedWinFsp := not WinFspOk;
@@ -339,9 +365,34 @@ begin
     if Result <> '' then
       exit;
   end;
+  TrayRan := CheckForMutexes('Global\{#AppName}-tray');
   StopRunning;
-  if NeedWinFsp then
-    Result := InstallWinFsp(Msi);
+  if not NeedWinFsp then
+    exit;
+  Drives := WinFspDrives;
+  if Drives <> '' then begin
+    { The drives of a tray that just quit can take a moment to go. }
+    Sleep(1000);
+    Drives := WinFspDrives;
+  end;
+  if Drives <> '' then begin
+    Log('WinFsp drives still mounted: ' + Drives);
+    if SuppressibleMsgBox('These WinFsp drives are still mounted:' + #13#10#13#10 + Drives + #13#10 +
+      'Updating WinFsp closes them or needs a restart. Continue?',
+      mbConfirmation, MB_OKCANCEL, IDOK) <> IDOK then begin
+      { Nothing is installed yet: start the stopped tray again. }
+      Tray := ExpandConstant('{app}\{#AppName}-tray.exe');
+      if TrayRan and FileExists(Tray) then
+        try
+          ExecAsOriginalUser(Tray, '', '', SW_SHOWNORMAL, ewNoWait, Code);
+        except
+          Log('restarting the tray: ' + GetExceptionMessage);
+        end;
+      Result := 'Close these WinFsp drives and run this setup again.';
+      exit;
+    end;
+  end;
+  Result := InstallWinFsp(Msi);
 end;
 
 function NeedRestart: Boolean;

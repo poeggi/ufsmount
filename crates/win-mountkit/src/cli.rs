@@ -147,8 +147,8 @@ fn command() -> clap::Command {
         })
         .mut_subcommand("register", |c| {
             c.about(format!(
-                r"Register with the WinFsp launcher, for `net use U: \\{}\PhysicalDriveN` (admin)",
-                p.launcher_class
+                r"Register with the WinFsp launcher, for `net use {}: \\{}\PhysicalDriveN` (admin)",
+                p.first_letter, p.launcher_class
             ))
         })
 }

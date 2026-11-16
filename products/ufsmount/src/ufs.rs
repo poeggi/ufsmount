@@ -453,6 +453,7 @@ impl Fs for UfsFs {
         let i = &self.info;
         let fsize = u64::from(i.fsize);
         Info {
+            fs: "UFS",
             label: i.label.clone(),
             serial: i.id[0] ^ i.id[1],
             block_size: i.fsize,

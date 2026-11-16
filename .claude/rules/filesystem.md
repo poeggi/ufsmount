@@ -27,4 +27,6 @@
 - `persistent_acls` stays off: copies take the destination's ACLs.
 - WinFsp allows one service per process. `winfs::Mount` sits on `FileSystemHost`; its `stop()` is idempotent
   and closes the disk.
+- A drive letter mount that fails while the letter is free is tried once more after 0.5 s: WinFsp mounts of
+  other processes (another product's tray) starting at the same moment can make it fail.
 - Panics never cross the C boundary.

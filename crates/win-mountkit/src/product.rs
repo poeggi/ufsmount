@@ -21,6 +21,9 @@ pub struct Product {
     /// "owner/name" on GitHub: source link, update check and setup downloads.
     pub repo: &'static str,
     pub version: &'static str,
+    /// The winfsp-rs version in the product's Cargo.lock, such as
+    /// "0.13.2+winfsp-2.1", for the About box.
+    pub winfsp_rs: &'static str,
     /// One line for `--help`.
     pub description: &'static str,
     /// The first line of the About box.
@@ -98,6 +101,7 @@ pub mod tests {
         first_letter: 'U',
         repo: "example/demo",
         version: "1.2.3",
+        winfsp_rs: "0.13.2+winfsp-2.1",
         description: "Demo",
         about: "Mounts demo disks.",
         built_using: "- demo 1.0",

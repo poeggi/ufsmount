@@ -15,7 +15,8 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
+    GetFileVersionInfoSizeW, GetFileVersionInfoW, GetLogicalDrives, VS_FIXEDFILEINFO,
+    VerQueryValueW,
 };
 use windows::Win32::System::LibraryLoader::{
     LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
@@ -135,7 +136,7 @@ pub struct Ctx {
 impl ReadOnlyFs {
     pub fn new(vol: Arc<Volume>, sd: SecurityDescriptor) -> ReadOnlyFs {
         let label = if vol.info.label.is_empty() {
-            product().fs.to_string()
+            vol.info.fs.to_string()
         } else {
             crate::names::display(&vol.info.label)
         };
@@ -589,7 +590,7 @@ pub fn build_host(
         .read_only_volume(true)
         .pass_query_directory_filename(true)
         .post_cleanup_when_modified_only(true)
-        .filesystem_name(product().fs);
+        .filesystem_name(vol.info.fs);
     if let Some(prefix) = prefix {
         vp.prefix(prefix);
     }
@@ -623,14 +624,34 @@ fn mount_on(
     mountpoint: &str,
     global: bool,
 ) -> anyhow::Result<String> {
-    let (target, shown) = match drive_letter(mountpoint) {
-        Some(letter) if global => (format!(r"\\.\{letter}"), letter),
-        Some(letter) => (letter.clone(), letter),
+    let letter = drive_letter(mountpoint);
+    let (target, shown) = match &letter {
+        Some(l) if global => (format!(r"\\.\{l}"), l.clone()),
+        Some(l) => (l.clone(), l.clone()),
         None => (mountpoint.to_string(), mountpoint.to_string()),
     };
-    host.mount(target.as_str())
-        .map_err(|e| anyhow::anyhow!("cannot mount on {shown}: {e}"))?;
+    let mut result = host.mount(target.as_str());
+    if let Err(e) = &result
+        && letter.is_some_and(|l| letter_free(&l))
+    {
+        log::warn!("cannot mount on {shown}: {e}; trying again");
+        std::thread::sleep(MOUNT_RETRY);
+        result = host.mount(target.as_str());
+    }
+    result.map_err(|e| anyhow::anyhow!("cannot mount on {shown}: {e}"))?;
     Ok(shown)
+}
+
+/// A drive letter mount that fails while the letter is free is tried once more
+/// after this pause: another WinFsp mount, of any process, that starts at the
+/// same moment can make it fail with an invalid parameter error.
+const MOUNT_RETRY: Duration = Duration::from_millis(500);
+
+/// Whether the drive letter of `U:` is not in use.
+fn letter_free(letter: &str) -> bool {
+    let bit = letter.as_bytes()[0].wrapping_sub(b'A');
+    // SAFETY: no arguments.
+    bit < 26 && unsafe { GetLogicalDrives() } & (1 << bit) == 0
 }
 
 /// A mounted, running file system. WinFsp allows one service per process, so
@@ -918,6 +939,9 @@ mod tests {
         assert_eq!(drive_letter("U").as_deref(), Some("U:"));
         assert_eq!(drive_letter(r"U:\").as_deref(), Some("U:"));
         assert_eq!(drive_letter(r"C:\mnt\disk"), None);
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        assert!(!letter_free(&system.to_ascii_uppercase()));
+        assert!(!letter_free("@:"));
     }
 
     #[test]

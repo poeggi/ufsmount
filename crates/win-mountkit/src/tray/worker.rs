@@ -187,12 +187,18 @@ fn watch_removal(window: usize, dev: &Device) -> usize {
     }
 }
 
-/// Drive letters to try, in order: the product's first letter, then U: down
-/// to D:. Skips letters in `used` (bit 0 = A:) and in `network`.
+/// Drive letters to try, in order: the product's first letter, the ones below
+/// it down to D:, then the ones above it up to U:, so products with first
+/// letters far apart rarely take each other's. Skips letters in `used`
+/// (bit 0 = A:) and in `network`.
 pub fn letter_order(used: u32, network: &[char]) -> Vec<char> {
-    let first = product().first_letter;
+    order_from(product().first_letter, used, network)
+}
+
+fn order_from(first: char, used: u32, network: &[char]) -> Vec<char> {
     std::iter::once(first)
-        .chain(('D'..='U').rev().filter(move |&c| c != first))
+        .chain(('D'..first).rev())
+        .chain((first..='U').skip(1))
         .filter(|&c| used & (1 << (c as u32 - 'A' as u32)) == 0 && !network.contains(&c))
         .collect()
 }
@@ -1077,5 +1083,11 @@ mod tests {
         assert!(!order.contains(&'C'));
         let u = 1 << ('U' as u32 - 'A' as u32);
         assert_eq!(letter_order(u, &['T'])[0], 'S');
+        let m = order_from('M', 0, &[]);
+        assert_eq!(m[..3], ['M', 'L', 'K']);
+        assert_eq!(m[9..12], ['D', 'N', 'O']);
+        assert_eq!(*m.last().unwrap(), 'U');
+        assert_eq!(m.len(), 18);
+        assert_eq!(order_from('D', 0, &[])[..2], ['D', 'E']);
     }
 }

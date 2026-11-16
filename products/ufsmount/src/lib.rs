@@ -15,6 +15,7 @@ pub static PRODUCT: Product = Product {
     first_letter: 'U',
     repo: "poeggi/ufsmount",
     version: env!("CARGO_PKG_VERSION"),
+    winfsp_rs: env!("UFSMOUNT_WINFSP_RS"),
     description: env!("CARGO_PKG_DESCRIPTION"),
     about: "Mounts FreeBSD UFS2 disks read-only.",
     built_using: concat!(
@@ -71,5 +72,7 @@ mod tests {
         let rufs = env!("UFSMOUNT_RUFS");
         assert!(lock.contains(&format!("name = \"rufs\"\nversion = \"{rufs}\"\n")));
         assert!(PRODUCT.built_using.contains(rufs));
+        let winfsp = PRODUCT.winfsp_rs;
+        assert!(lock.contains(&format!("name = \"winfsp\"\nversion = \"{winfsp}\"\n")));
     }
 }

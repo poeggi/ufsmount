@@ -188,7 +188,8 @@ pub fn register() -> anyhow::Result<()> {
     result?;
     println!("Registered {} with the WinFsp launcher.", exe.display());
     println!(
-        r"Use it from an elevated prompt: net use U: \\{}\PhysicalDriveN /persistent:no",
+        r"Use it from an elevated prompt: net use {}: \\{}\PhysicalDriveN /persistent:no",
+        product().first_letter,
         product().launcher_class
     );
     Ok(())

@@ -215,6 +215,12 @@ impl Volume {
             anyhow::anyhow!("{} holds no {fs} file system", cand.id)
         })?;
         let fs = product().backend.open(dev.clone(), cand, found)?;
+        // WinFsp holds 15 characters and a NUL.
+        let name = fs.info().fs;
+        anyhow::ensure!(
+            (1..16).contains(&name.len()) && name.is_ascii(),
+            "the file system name {name:?} does not fit WinFsp"
+        );
         Ok(Volume::new(dev, fs, charset))
     }
 

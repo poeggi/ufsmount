@@ -5,6 +5,9 @@ Write support is not a feature. UFS1 is not supported (rufs has no UFS1).
 
 ## Layout
 A Cargo workspace. Shared code names no product; each product changes only its own folder.
+Other products use win-mountkit as a git dependency on a release tag, and install side by side with ufsmount:
+every system name comes from the product id, and only WinFsp is shared. A per-volume detail
+(such as the file system name in `fs::Info`) comes from the backend, not from `Product`.
 - `crates/win-mountkit/` shared: disk access, partition tables, the volume layer, WinFsp, launcher, `cp`,
   CLI (`cli.rs`), tray (`tray/`). `product.rs` is the `Product` struct, `fs.rs` the `Backend`/`Fs` traits.
 - `products/ufsmount/` ufsmount: `src/lib.rs` (`PRODUCT`: names, URLs, texts), `src/ufs.rs` (UFS through rufs:
@@ -28,7 +31,7 @@ A Cargo workspace. Shared code names no product; each product changes only its o
 - `winfsp-x64.dll` is delay-loaded (every target, unit tests included) by full path from the WinFsp
   InstallDir, never from the exe folder. Link flags do not carry over between packages: the shared crate's
   `build.rs` sets them for its tests, each product's `build.rs` for its exes and tests (exes also get
-  `/DEPENDENTLOADFLAG:0x800`).
+  `/DEPENDENTLOADFLAG:0x800`). `/IGNORE:4199` silences targets without imports from a delay-loaded DLL.
 - Every exe and test calls `set_product` (ufsmount: `ufsmount::init()`) first. The shared crate's own
   tests use a demo product.
 

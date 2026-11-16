@@ -38,6 +38,9 @@ pub struct Stat {
 
 #[derive(Debug, Clone)]
 pub struct Info {
+    /// The file system's name for Windows: Explorer shows it, and it is the
+    /// label of a volume without one. 1 to 15 ASCII characters.
+    pub fs: &'static str,
     /// The volume label, empty for none.
     pub label: Vec<u8>,
     pub serial: u32,

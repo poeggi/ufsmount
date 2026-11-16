@@ -9,6 +9,9 @@
 - Read the Inno Setup help before changing directives. Do not try styles or options by trial.
 - WinFsp is installed when missing or older. The MSI is copied from next to the setup, or downloaded, into `{tmp}`,
   checked by SHA-256 and run there. It is ready before the tray is stopped. WinFsp stays on uninstall.
+- Before a WinFsp update, WinFsp drives still mounted after the tray stopped (other products, command line
+  mounts) are listed by WinFsp's `fsptool lsvol`, and the setup asks first. Silent installs with
+  `/SUPPRESSMSGBOXES` go on. Cancel starts the stopped tray again.
 - An unticked PATH or launcher task on an upgrade removes that PATH entry or registration.
 - On an upgrade the launcher task is preselected when registered, and the logon task as
   `<ProgramData>\ufsmount\start-at-sign-in` says ("1" or "0", written with each task).
@@ -42,8 +45,10 @@
   with DBTF_MEDIA (a drive without a letter gets none: Rescan). A disc without UFS, or with read errors,
   is probed again only on such a media arrival or Rescan; a disc not ready yet is retried.
   Optical drives are untested on hardware.
-- Mounts every file system found, at most 8. Letters: the product's first letter (ufsmount: U:), then
-  U: down to D:, skipping letters in use and the session user's network mappings (`HKEY_USERS\<SID>\Network`).
+- Mounts every file system found, at most 8. Letters: the product's first letter (ufsmount: U:), the ones
+  below it down to D:, then the ones above it up to U:. So ufsmount (U:) and a product starting at M: keep to
+  their own letters (8 mounts each) unless other drives take the ones between.
+  Skipped: letters in use and the session user's network mappings (`HKEY_USERS\<SID>\Network`).
 - Each worker command runs under `catch_unwind`; a panic becomes an "Internal error" note.
 - A disk arrival forgets which removable-media disks (card readers) held no UFS, so a swapped card is
   probed again. Fixed disks are not probed again: that would wake a sleeping disk.
@@ -61,6 +66,7 @@
 - "Start at sign-in" is shown when `start-at-sign-in` can be read; a task changed by hand
   shows wrong until the next toggle or setup run.
 - About is a TaskDialog (Common Controls 6 via the manifest; comctl32.dll is delay-loaded, so
-  other targets start without it). Versions come from Cargo.lock and rustc through build.rs.
+  other targets start without it). Versions come from rustc and the product's Cargo.lock (`Product.winfsp_rs`):
+  a git dependency on win-mountkit cannot see the consumer's lock.
   The footer icons are drawn at run time for the dialog's DPI.
 - The icon is loaded for the DPI of the taskbar's monitor and loaded again on DPI and display changes.

@@ -765,6 +765,7 @@ impl Worker {
                 }
             }
             Cmd::AutoMount(on) => {
+                log::info!("mount automatically: {on}");
                 self.auto_mount = on;
                 settings::set_auto_mount(on);
                 if on {

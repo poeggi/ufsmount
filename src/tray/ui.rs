@@ -452,7 +452,7 @@ fn track_menu(hwnd: HWND, snap: &Snapshot, x: i32, y: i32) -> Option<(u32, Vec<A
         if !snap.idle.is_empty() {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("Not mounted"));
         } else if snap.mounts.is_empty() {
-            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("No UFS disk mounted"));
+            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("No UFS disks"));
         }
         for i in &snap.idle {
             if let Ok(sub) = CreatePopupMenu() {

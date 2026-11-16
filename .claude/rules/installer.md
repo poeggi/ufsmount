@@ -1,7 +1,10 @@
 # winfsp-ufs: setup and tray
 
-## Setup (`installer/ufsmount.iss`, Inno Setup 7.1.1)
-- Build: `ISCC /DAppVersion=<version> installer\ufsmount.iss`. Run ISCC from PowerShell or cmd:
+## Setup (Inno Setup 7.1.1)
+- `products/ufsmount/installer.iss` holds the product's defines (name, AppGuid, repo, launcher class) and
+  includes `installer/common.iss`, which is the same for every product. Relative paths in it are relative
+  to the product's script. The AppGuid of a product never changes: upgrades find the installed version by it.
+- Build: `ISCC /DAppVersion=<version> products\ufsmount\installer.iss`. Run ISCC from PowerShell or cmd:
   Git Bash rewrites `/D` arguments.
 - Read the Inno Setup help before changing directives. Do not try styles or options by trial.
 - WinFsp is installed when missing or older. The MSI is copied from next to the setup, or downloaded, into `{tmp}`,
@@ -18,17 +21,19 @@
   `InitializeWizard` gives every wizard list (components, tasks, run) more room through `Offset`.
   A new checkbox list must get the same. Fixed upstream in issrc commit 5b4c39b (after 7.1.1);
   update the pin in `ci.yml` once a release has it.
-- `logos/wizard/*.png` are rendered from `logos/logo.svg` at the sizes the help lists per DPI.
-- `logos/ufsmount.ico` (exe, tray and setup icon): 16-64 px from `logos/logo-small.svg`, a bold variant
-  that stays readable in the tray; 256 px from `logos/logo.svg`. Both have a transparent background
-  and a white drive with black "U:".
+- `products/ufsmount/logos/wizard/*.png` are rendered from `logos/logo.svg` at the sizes the help lists per DPI.
+- `products/ufsmount/logos/ufsmount.ico` (exe, tray and setup icon): 16-64 px from `logos/logo-small.svg`,
+  a bold variant that stays readable in the tray; 256 px from `logos/logo.svg`. Both have a transparent
+  background and a white drive with black "U:".
 - The setup is unsigned: SmartScreen warns, Smart App Control blocks it.
 
-## Tray (`src/tray`)
+## Tray (`crates/winfsp-mount/src/tray`)
+- Names and texts come from the product: `<product>-tray` task and window class, `Global\<product>-tray`
+  objects, `<ProgramData>\<product>`, `SOFTWARE\<product>`, the menu's "No <fs> disks".
 - The UI thread runs the window, icon and menu. One worker thread does all disk work.
 - Calls that can dispatch messages (Shell_NotifyIconW, menus, message boxes) run outside `with_app`.
-- Mounts every UFS2 file system found, at most 8. Letters: U:, then T: down to D:,
-  skipping letters in use and the session user's network mappings (`HKEY_USERS\<SID>\Network`).
+- Mounts every file system found, at most 8. Letters: the product's first letter (ufsmount: U:), then
+  U: down to D:, skipping letters in use and the session user's network mappings (`HKEY_USERS\<SID>\Network`).
 - Each worker command runs under `catch_unwind`; a panic becomes an "Internal error" note.
 - A disk arrival forgets which removable-media disks (card readers) held no UFS, so a swapped card is
   probed again. Fixed disks are not probed again: that would wake a sleeping disk.
@@ -36,8 +41,8 @@
   are listed under "Not mounted". A file system the user unmounted is listed there too and is not
   mounted automatically until "Rescan" or a new plug-in. Listed ones hold no disk handle open.
   Automatic scans skip a fixed disk with listed file systems; a removable one is probed again.
-- A letter the user picks ("Mount on", "Mount as", "Drive letter") is remembered per UFS id in
-  `<ProgramData>\ufsmount\letters`; automatic mounts try it first when it is free.
+- A letter the user picks ("Mount on", "Mount as", "Drive letter") is remembered per file system id
+  (UFS: `<id0>-<id1>` in hex) in `<ProgramData>\<product>\letters`; automatic mounts try it first when it is free.
 - Each mounted disk's handle is registered for removal requests (DBT_DEVTYP_HANDLE). On
   DBT_DEVICEQUERYREMOVE (Eject) the tray unmounts every mount of that disk and closes it before it
   answers, else the open handle blocks the eject. After 10 s it refuses and scans the disk again

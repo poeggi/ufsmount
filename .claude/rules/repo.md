@@ -4,8 +4,14 @@ ufsmount mounts FreeBSD UFS2 file systems read-only on Windows through WinFsp.
 Write support is not a feature. UFS1 is not supported (rufs has no UFS1).
 
 ## Layout
-- `src/` the crate: CLI (`main.rs`), library (`lib.rs`), tray (`tray/`, `bin/ufsmount-tray.rs`).
-- `installer/` Inno Setup scripts. `logos/` logo, icon, wizard images. `docs/` images for the README.
+A Cargo workspace. Shared code names no product; each product changes only its own folder.
+- `crates/winfsp-mount/` shared: disk access, partition tables, the volume layer, WinFsp, launcher, `cp`,
+  CLI (`cli.rs`), tray (`tray/`). `product.rs` is the `Product` struct, `fs.rs` the `Backend`/`Fs` traits.
+- `products/ufsmount/` ufsmount: `src/lib.rs` (`PRODUCT`: names, URLs, texts), `src/ufs.rs` (UFS through rufs:
+  BSD labels, superblock), the two thin exes, `build.rs` (icon, manifest, link flags), `installer.iss` (defines),
+  `logos/`, `THIRD-PARTY-NOTICES.txt`, `tests/`.
+- `installer/` shared setup: `common.iss` (included by each product's `installer.iss`), `winfsp.iss`.
+- `docs/` images for the README.
 - `vendor/fuse-ufs/` upstream fuse-ufs with rufs, a git subtree. See rufs.md.
 - All build output and other temporary files go to `temp/` (git-ignored; set in `.cargo/config.toml`).
   The setup lands in `temp/installer`. Nothing built is committed: releases carry the exes and the setup.
@@ -20,13 +26,19 @@ Write support is not a feature. UFS1 is not supported (rufs has no UFS1).
   with `CARGO_TARGET_DIR=temp/vendor`.
 - WinFsp minimum version: `installer/winfsp.iss` is the one source. A Rust test checks `MIN_WINFSP` against it.
 - `winfsp-x64.dll` is delay-loaded (every target, unit tests included) by full path from the WinFsp
-  InstallDir, never from the exe folder.
+  InstallDir, never from the exe folder. Link flags do not carry over between packages: the shared crate's
+  `build.rs` sets them for its tests, each product's `build.rs` for its exes and tests (exes also get
+  `/DEPENDENTLOADFLAG:0x800`).
+- Every exe and test calls `set_product` (ufsmount: `ufsmount::init()`) first. The shared crate's own
+  tests use a demo product.
 
 ## CI (`.github/workflows/ci.yml`)
-- build: fmt, clippy, tests with a WinFsp mount, release build, the setup, and a 0.0.1 setup for the downgrade test.
+- build: fmt, a check that `crates/` never says "ufs", clippy, tests with a WinFsp mount, release build,
+  the setup, and a 0.0.1 setup for the downgrade test.
 - smoke: a fresh runner without WinFsp. Installs (downloads WinFsp), mounts a test image through the tray,
   downgrades and upgrades, uninstalls, and checks that nothing is left and PATH is unchanged.
-- release: tags `v*` only. The tag must equal the Cargo version. See the release skill.
+- release: tags `v*` only. The tag must equal the version in the root `Cargo.toml` (`[workspace.package]`).
+  See the release skill.
 - Actions are pinned by commit SHA with the version as a comment. Tag builds run without the cache.
   Every job has a timeout.
 
@@ -34,7 +46,7 @@ Write support is not a feature. UFS1 is not supported (rufs has no UFS1).
 - Releases only on the user's explicit request.
 - ASCII only in every file. Each source file has the SPDX line `AGPL-3.0-or-later`.
 - Dependencies: the latest stable release, checked upstream.
-- `THIRD-PARTY-NOTICES.txt` is maintained by hand. When dependencies change, compare it with
-  `cargo tree -e normal --target x86_64-pc-windows-msvc --prefix none --format "{p}|{l}"`.
+- `products/ufsmount/THIRD-PARTY-NOTICES.txt` is maintained by hand. When dependencies change, compare it with
+  `cargo tree -p ufsmount -e normal --target x86_64-pc-windows-msvc --prefix none --format "{p}|{l}"`.
 - Licenses: ours AGPL-3.0-or-later. rufs BSD-2-Clause, winfsp-rs GPL-3.0, WinFsp GPL-3.0 with FLOSS exception.
   Dual-licensed crates are used under Apache-2.0.

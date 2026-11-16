@@ -1,0 +1,23 @@
+[package]
+name = "ufsmount"
+description = "Mount FreeBSD UFS2 disks read-only on Windows, using WinFsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+rufs = { path = "../../vendor/fuse-ufs/rufs" }
+winfsp-mount = { path = "../../crates/winfsp-mount" }
+
+[dev-dependencies]
+crc32fast.workspace = true
+windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_Console"] }
+zstd.workspace = true
+
+[build-dependencies]
+winresource.workspace = true

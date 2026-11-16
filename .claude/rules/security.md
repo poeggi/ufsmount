@@ -36,8 +36,11 @@ Raw disk reads and global drive letters need admin rights. The tray and the laun
 ## Mounts and the WinFsp launcher
 - File security: read for SYSTEM, Administrators and the session user.
   `--sddl` is validated: owner and group present, at most 1024 bytes.
-- Launcher instance names must match `^\\ufs\\PhysicalDrive[0-9]{1,3}(s[1-4]([a-t])?|p[0-9]{1,3})?\\?$`.
+- Launcher instance names must match `^\\<class>\\PhysicalDrive[0-9]{1,3}(s[1-4]([a-t])?|p[0-9]{1,3})?\\?$`,
+  `<class>` being the product's launcher class (ufsmount: `ufs`).
   A `-U` user that does not resolve stops the start. Never fall back to a wider security descriptor.
+- Product names (id, launcher class) are `[a-z0-9][a-z0-9-]{0,31}`, checked by `set_product`: they reach
+  `schtasks` command lines and registry paths unquoted.
 - The launcher registration keeps WinFsp's default Security (SYSTEM and Administrators).
   Never grant Everyone: that exposes every raw disk.
 - A mounted disk is never reopened by its number. A disk that is gone stops and unmounts its mount.

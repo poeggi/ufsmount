@@ -1,6 +1,6 @@
 # winfsp-ufs
 
-<img src="logos/logo.svg" width="96" alt="ufsmount logo">
+<img src="products/ufsmount/logos/logo.svg" width="96" alt="ufsmount logo">
 
 Mount a FreeBSD UFS2 disk on Windows as a read-only drive.
 Explorer, copy and robocopy work as on any drive.
@@ -102,10 +102,16 @@ The setup needs [Inno Setup](https://jrsoftware.org/isinfo.php) 7.1.1.
 ```
 cargo build --release
 cargo test
-ISCC /DAppVersion=<version> installer\ufsmount.iss
+ISCC /DAppVersion=<version> products\ufsmount\installer.iss
 ```
 
 The setup goes to `temp\installer`. `UFSMOUNT_MOUNT_TEST=1` enables the WinFsp mount tests.
+
+The code is in two parts.
+`crates/winfsp-mount` is the shared part: disks, WinFsp, the command line and the tray.
+It names no file system.
+`products/ufsmount` holds the UFS code, the names, texts, logo and setup settings.
+Another read-only file system could reuse the shared part with its own product folder.
 
 ## Credits
 

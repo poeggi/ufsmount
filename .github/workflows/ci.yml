@@ -52,6 +52,13 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      # Product names and texts belong in products/; the shared crates name none.
+      - name: Shared code is product-neutral
+        shell: pwsh
+        run: |
+          $hits = Get-ChildItem crates -Recurse -File | Select-String -Pattern '(?<![a-z])r?ufs'
+          if ($hits) { $hits | ForEach-Object { Write-Host $_ }; throw 'crates/ names a product' }
+
       - name: Clippy
         run: cargo clippy --all-targets --locked --no-deps -- -D warnings
 
@@ -98,13 +105,13 @@ jobs:
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          & "$env:RUNNER_TEMP\inno\ISCC.exe" /Q "/DAppVersion=$env:APP_VERSION" installer\ufsmount.iss
+          & "$env:RUNNER_TEMP\inno\ISCC.exe" /Q "/DAppVersion=$env:APP_VERSION" products\ufsmount\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
 
       - name: Build an older setup for the downgrade test
         shell: pwsh
         run: |
-          & "$env:RUNNER_TEMP\inno\ISCC.exe" /Q /DAppVersion=0.0.1 "/O$env:RUNNER_TEMP\old-setup" installer\ufsmount.iss
+          & "$env:RUNNER_TEMP\inno\ISCC.exe" /Q /DAppVersion=0.0.1 "/O$env:RUNNER_TEMP\old-setup" products\ufsmount\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -120,7 +127,7 @@ jobs:
             temp/release/ufsmount-tray.exe
             temp/installer/ufsmount-*-setup.exe
             LICENSE
-            THIRD-PARTY-NOTICES.txt
+            products/ufsmount/THIRD-PARTY-NOTICES.txt
             licenses/*.txt
 
   smoke:
@@ -268,7 +275,7 @@ jobs:
           mkdir out
           find dist -type f \( -name ufsmount.exe -o -name 'ufsmount-*-setup.exe' \) -exec cp {} out/ \;
           cp dist/LICENSE out/LICENSE.txt
-          cp dist/THIRD-PARTY-NOTICES.txt dist/licenses/*.txt out/
+          cp dist/products/ufsmount/THIRD-PARTY-NOTICES.txt dist/licenses/*.txt out/
           cd out
           sha256sum * > SHA256SUMS
           cat SHA256SUMS

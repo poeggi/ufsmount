@@ -731,14 +731,11 @@ name = "ufsmount"
 version = "0.3.4"
 dependencies = [
  "anyhow",
- "clap",
  "crc32fast",
- "env_logger",
  "log",
  "rufs",
- "thiserror",
  "windows 0.62.2",
- "winfsp",
+ "winfsp-mount",
  "winresource",
  "zstd",
 ]
@@ -1002,6 +999,20 @@ dependencies = [
  "windows 0.61.3",
  "windows 0.62.2",
  "winfsp-sys",
+]
+
+[[package]]
+name = "winfsp-mount"
+version = "0.3.4"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crc32fast",
+ "env_logger",
+ "log",
+ "thiserror",
+ "windows 0.62.2",
+ "winfsp",
 ]
 
 [[package]]

@@ -81,6 +81,10 @@ pub struct Found {
     pub block_size: u32,
     /// Which file system of a container, for the backend's `open`; 0 for a plain one.
     pub volume: u32,
+    /// Mounted only on request, never automatically: the tray lists it under
+    /// "Not mounted", the command line and the launcher need its part named.
+    /// For a container's helper volumes.
+    pub on_request: bool,
     /// One line for `probe`.
     pub summary: String,
 }

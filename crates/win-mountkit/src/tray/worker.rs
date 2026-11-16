@@ -100,7 +100,7 @@ pub type Note = (String, String, bool);
 pub struct Snapshot {
     pub mounts: Vec<MountView>,
     pub idle: Vec<IdleView>,
-    /// The drive letters mounts may use, in order, and whether each is free.
+    /// The drive letters for the menus, U: down to D:, and whether each is free.
     pub letters: Vec<(char, bool)>,
     pub auto_mount: bool,
     pub notes: Vec<Note>,
@@ -127,6 +127,8 @@ struct Idle {
     id: u64,
     key: Key,
     label: String,
+    /// `Found.on_request`: turning "Mount automatically" on skips it.
+    on_request: bool,
 }
 
 struct Active {
@@ -134,6 +136,7 @@ struct Active {
     key: Key,
     letter: String,
     label: String,
+    on_request: bool,
     mount: Mount,
     dev: Arc<Device>,
     stop: Arc<AtomicBool>,
@@ -390,10 +393,8 @@ impl Worker {
                     .copied(),
             })
             .collect();
-        let letters = letter_order(0, &[])
-            .into_iter()
-            .map(|l| (l, free.contains(&l)))
-            .collect();
+        // The menus list U: down to D: for every product.
+        let letters = ('D'..='U').rev().map(|l| (l, free.contains(&l))).collect();
         {
             let mut snap = self.shared.snap.lock().unwrap_or_else(|e| e.into_inner());
             snap.mounts = mounts;
@@ -429,11 +430,16 @@ impl Worker {
         free
     }
 
-    fn add_idle(&mut self, key: Key, label: String) {
+    fn add_idle(&mut self, key: Key, label: String, on_request: bool) {
         if !self.idle.iter().any(|i| i.key == key) {
             let id = self.next_id;
             self.next_id += 1;
-            self.idle.push(Idle { id, key, label });
+            self.idle.push(Idle {
+                id,
+                key,
+                label,
+                on_request,
+            });
         }
     }
 
@@ -456,14 +462,15 @@ impl Worker {
             None => dev.name().to_string(),
         };
         let label = format!("{name} {}  {}", cand.id, human_size(found.size));
-        if want.is_none() && (!self.auto_mount || self.unmounted.contains(&key)) {
-            self.add_idle(key, label);
+        let on_request = found.on_request;
+        if want.is_none() && (on_request || !self.auto_mount || self.unmounted.contains(&key)) {
+            self.add_idle(key, label, on_request);
             return;
         }
         if self.actives.len() < MAX_MOUNTS {
             self.cap_warned = false;
         } else {
-            self.add_idle(key, label.clone());
+            self.add_idle(key, label.clone(), on_request);
             if want.is_some() || !std::mem::replace(&mut self.cap_warned, true) {
                 let text = format!("{label} is not mounted (limit {MAX_MOUNTS})");
                 self.note("Too many file systems", text, true);
@@ -473,7 +480,7 @@ impl Worker {
         let vol = match Volume::open(dev.clone(), cand, Charset::Utf8) {
             Ok(v) => Arc::new(v),
             Err(e) => {
-                self.add_idle(key, label.clone());
+                self.add_idle(key, label.clone(), on_request);
                 self.note("Cannot open", format!("{label}: {e:#}"), true);
                 return;
             }
@@ -504,6 +511,7 @@ impl Worker {
                         key,
                         letter: target,
                         label,
+                        on_request,
                         mount,
                         dev: dev.clone(),
                         stop,
@@ -519,7 +527,7 @@ impl Worker {
             }
         }
         let why = last_err.map_or("no free drive letter".to_string(), |e| format!("{e:#}"));
-        self.add_idle(key, label.clone());
+        self.add_idle(key, label.clone(), on_request);
         self.note("Cannot mount", format!("{label}: {why}"), true);
     }
 
@@ -724,7 +732,7 @@ impl Worker {
             Cmd::Unmount(id) => {
                 if let Some(a) = self.take(id) {
                     self.unmounted.insert(a.key.clone());
-                    self.add_idle(a.key.clone(), a.label.clone());
+                    self.add_idle(a.key.clone(), a.label.clone(), a.on_request);
                     drop(a);
                 }
             }
@@ -769,7 +777,7 @@ impl Worker {
                     let waiting: Vec<Key> = self
                         .idle
                         .iter()
-                        .filter(|i| !self.unmounted.contains(&i.key))
+                        .filter(|i| !i.on_request && !self.unmounted.contains(&i.key))
                         .map(|i| i.key.clone())
                         .collect();
                     for key in waiting {
@@ -916,6 +924,18 @@ mod tests {
     }
 
     #[test]
+    fn on_request_is_listed_not_mounted() {
+        let mut w = worker();
+        w.auto_mount = true;
+        let dev = crate::device::testing::FakeDisk::new(vec![0; 4096], 512).into_device();
+        let cand = crate::partition::tests::found_at("p2v2", true);
+        w.mount(Some(GONE), &dev, &cand, None);
+        assert!(w.actives.is_empty());
+        assert_eq!(w.idle.len(), 1);
+        assert!(w.idle[0].on_request);
+    }
+
+    #[test]
     fn arrival_forgets_removable_disks_without_a_file_system() {
         let mut w = worker();
         let (card, fixed, disc) = (Disk::Drive(3), Disk::Drive(4), Disk::CdRom(0));
@@ -962,8 +982,8 @@ mod tests {
     fn idle_file_systems_are_listed() {
         let mut w = worker();
         let id = "7-7".to_string();
-        w.add_idle((Some(GONE), 65536, id.clone()), "disk 999".into());
-        w.add_idle((Some(GONE), 65536, id.clone()), "disk 999".into());
+        w.add_idle((Some(GONE), 65536, id.clone()), "disk 999".into(), false);
+        w.add_idle((Some(GONE), 65536, id.clone()), "disk 999".into(), false);
         assert_eq!(w.idle.len(), 1, "listed once");
         let chosen = w.free_letters()[1];
         w.letters.insert(id, chosen);
@@ -987,7 +1007,7 @@ mod tests {
     #[test]
     fn arrival_keeps_the_list() {
         let mut w = worker();
-        w.add_idle((Some(GONE), 0, "1-1".into()), "a".into());
+        w.add_idle((Some(GONE), 0, "1-1".into()), "a".into(), false);
         let id = w.idle[0].id;
         assert!(w.handle(Cmd::Arrived { media: false }, &mut None).is_none());
         assert_eq!(w.idle.len(), 1);
@@ -997,7 +1017,7 @@ mod tests {
     #[test]
     fn letters_in_use_or_invalid_are_refused() {
         let mut w = worker();
-        w.add_idle((Some(GONE), 0, "1-1".into()), "a".into());
+        w.add_idle((Some(GONE), 0, "1-1".into()), "a".into(), false);
         let id = w.idle[0].id;
         for letter in ['C', 'Z', '@'] {
             assert!(w.handle(Cmd::Mount(id, letter), &mut None).is_none());

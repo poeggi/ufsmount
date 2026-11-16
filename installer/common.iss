@@ -132,6 +132,16 @@ begin
       ((Minor = {#WinFspMinMinor}) and (Build >= {#WinFspMinBuild}))));
 end;
 
+{ Whether Path is the expected WinFsp MSI. }
+function ExpectedMsi(const Path: String): Boolean;
+begin
+  try
+    Result := FileExists(Path) and (GetSHA256OfFile(Path) = '{#WinFspSha256}');
+  except
+    Result := False;
+  end;
+end;
+
 { Copy the WinFsp MSI next to the setup exe to Msi, if it is the expected one. }
 function CopyLocalMsi(const Msi: String): Boolean;
 var
@@ -141,15 +151,12 @@ begin
   Src := ExpandConstant('{src}\{#WinFspMsi}');
   if not FileExists(Src) then
     exit;
-  if not CopyFile(Src, Msi, False) then begin
+  { A second pass (Back after an error) keeps a good earlier copy, maybe read-only. }
+  if not ExpectedMsi(Msi) and not CopyFile(Src, Msi, False) then begin
     Log('WinFsp: cannot copy ' + Src);
     exit;
   end;
-  try
-    Result := GetSHA256OfFile(Msi) = '{#WinFspSha256}';
-  except
-    Result := False;
-  end;
+  Result := ExpectedMsi(Msi);
   if Result then
     Log('WinFsp: using ' + Src)
   else

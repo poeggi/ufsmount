@@ -49,6 +49,7 @@
   below it down to D:, then the ones above it up to U:. So ufsmount (U:) and a product starting at M: keep to
   their own letters (8 mounts each) unless other drives take the ones between.
   Skipped: letters in use and the session user's network mappings (`HKEY_USERS\<SID>\Network`).
+  The letter menus list U: down to D: for every product.
 - Each worker command runs under `catch_unwind`; a panic becomes an "Internal error" note.
 - A disk arrival forgets which removable-media disks (card readers) held no UFS, so a swapped card is
   probed again. Fixed disks are not probed again: that would wake a sleeping disk.
@@ -56,6 +57,9 @@
   are listed under "Not mounted". A file system the user unmounted is listed there too and is not
   mounted automatically until "Rescan" or a new plug-in. Listed ones hold no disk handle open.
   Automatic scans skip a fixed disk with listed file systems; a removable one is probed again.
+- A file system the backend marks `Found.on_request` (a container's helper volumes) is always listed under
+  "Not mounted" and mounts only from the menu; after a Rescan or a refused eject it is listed again.
+  The command line and the launcher take it only when its part is named. ufsmount marks none.
 - A letter the user picks ("Mount on", "Mount as", "Drive letter") is remembered per file system id
   (UFS: `<id0>-<id1>` in hex) in `<ProgramData>\<product>\letters`; automatic mounts try it first when it is free.
 - Each mounted disk's handle is registered for removal requests (DBT_DEVTYP_HANDLE). On

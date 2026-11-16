@@ -83,6 +83,9 @@ impl fmt::Display for Candidate {
             self.origin
         )?;
         match &self.fs {
+            FsKind::Found(found) if found.on_request => {
+                write!(f, "\n       {} (mounted only on request)", found.summary)
+            }
             FsKind::Found(found) => write!(f, "\n       {}", found.summary),
             FsKind::Unsupported(what) => write!(f, "\n       {what} (not supported)"),
             FsKind::None => Ok(()),
@@ -625,10 +628,14 @@ fn probe_with(dev: &Arc<Device>, backend: &dyn Backend) -> Vec<Candidate> {
     fallback.map(|(_, out)| out).unwrap_or_default()
 }
 
-/// Pick the partition to use: the one named by `part`, or the only file system found.
+/// Pick the partition to use: the one named by `part`, or the only file system
+/// found that is not mounted only on request.
 pub fn select<'a>(cands: &'a [Candidate], part: Option<&str>) -> anyhow::Result<&'a Candidate> {
     let fs = product().fs_variant;
-    let found: Vec<&Candidate> = cands.iter().filter(|c| c.found().is_some()).collect();
+    let found: Vec<&Candidate> = cands
+        .iter()
+        .filter(|c| c.found().is_some_and(|f| !f.on_request))
+        .collect();
     let list = || {
         cands
             .iter()
@@ -652,6 +659,10 @@ pub fn select<'a>(cands: &'a [Candidate], part: Option<&str>) -> anyhow::Result<
         }
         None => match found.as_slice() {
             [one] => Ok(one),
+            [] if cands.iter().any(|c| c.found().is_some()) => anyhow::bail!(
+                "only {fs} file systems mounted on request were found, choose one with --part:\n{}",
+                list()
+            ),
             [] => anyhow::bail!("no {fs} file system found. Candidates:\n{}", list()),
             _ => anyhow::bail!(
                 "several {fs} file systems found, choose one with --part:\n{}",
@@ -791,6 +802,7 @@ pub mod tests {
                         size: 512,
                         block_size: 512,
                         volume,
+                        on_request: false,
                         summary: String::new(),
                     }))
                 })
@@ -955,5 +967,39 @@ pub mod tests {
             .filter_map(|c| c.found().map(|f| f.volume))
             .collect();
         assert_eq!(volumes, [0, 1]);
+    }
+
+    /// A file system found at the start of the disk.
+    pub fn found_at(id: &str, on_request: bool) -> Candidate {
+        Candidate {
+            id: id.into(),
+            start: 0,
+            len: 512,
+            origin: String::new(),
+            table: Table::Whole,
+            fs: FsKind::Found(Box::new(Found {
+                id: id.into(),
+                size: 512,
+                block_size: 512,
+                volume: 0,
+                on_request,
+                summary: "demo".into(),
+            })),
+        }
+    }
+
+    #[test]
+    fn on_request_needs_part() {
+        let cands = [found_at("p2v1", false), found_at("p2v2", true)];
+        assert_eq!(select(&cands, None).unwrap().id, "p2v1");
+        assert_eq!(select(&cands, Some("p2v2")).unwrap().id, "p2v2");
+        let err = select(&cands[1..], None).unwrap_err().to_string();
+        assert!(err.contains("mounted on request were found"), "{err}");
+        assert!(
+            cands[1]
+                .to_string()
+                .ends_with("demo (mounted only on request)")
+        );
+        assert!(cands[0].to_string().ends_with("demo"));
     }
 }

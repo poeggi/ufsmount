@@ -8,6 +8,9 @@ A Cargo workspace. Shared code names no product; each product changes only its o
 Other products use win-mountkit as a git dependency on a release tag, and install side by side with ufsmount:
 every system name comes from the product id, and only WinFsp is shared. A per-volume detail
 (such as the file system name in `fs::Info`) comes from the backend, not from `Product`.
+A git dependency carries no link setup. Each product supplies its own: `+crt-static` (`.cargo/config.toml`),
+the link args of `products/ufsmount/build.rs`, the tray manifest (Common Controls 6), and `Product.winfsp_rs`
+from its own Cargo.lock. New fields in `Product`, `Found` or `Info` break a product's build until it sets them.
 - `crates/win-mountkit/` shared: disk access, partition tables, the volume layer, WinFsp, launcher, `cp`,
   CLI (`cli.rs`), tray (`tray/`). `product.rs` is the `Product` struct, `fs.rs` the `Backend`/`Fs` traits.
 - `products/ufsmount/` ufsmount: `src/lib.rs` (`PRODUCT`: names, URLs, texts), `src/ufs.rs` (UFS through rufs:
@@ -32,6 +35,7 @@ every system name comes from the product id, and only WinFsp is shared. A per-vo
   InstallDir, never from the exe folder. Link flags do not carry over between packages: the shared crate's
   `build.rs` sets them for its tests, each product's `build.rs` for its exes and tests (exes also get
   `/DEPENDENTLOADFLAG:0x800`). `/IGNORE:4199` silences targets without imports from a delay-loaded DLL.
+  It also hides a `/DELAYLOAD` name that matches nothing: the smoke job catches a static WinFsp import.
 - Every exe and test calls `set_product` (ufsmount: `ufsmount::init()`) first. The shared crate's own
   tests use a demo product.
 

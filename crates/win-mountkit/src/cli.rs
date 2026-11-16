@@ -115,7 +115,7 @@ enum Command {
     Mount {
         #[command(flatten)]
         disk: Disk,
-        /// Drive letter (U:) or an empty directory.
+        /// Drive letter or an empty directory.
         mountpoint: String,
         /// Security descriptor for all files (default: read for SYSTEM, Administrators and you).
         #[arg(long)]
@@ -150,6 +150,14 @@ fn command() -> clap::Command {
                 r"Register with the WinFsp launcher, for `net use {}: \\{}\PhysicalDriveN` (admin)",
                 p.first_letter, p.launcher_class
             ))
+        })
+        .mut_subcommand("mount", |c| {
+            c.mut_arg("mountpoint", |a| {
+                a.help(format!(
+                    "Drive letter ({}:) or an empty directory",
+                    p.first_letter
+                ))
+            })
         })
 }
 

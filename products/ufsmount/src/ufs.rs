@@ -328,6 +328,7 @@ fn found(info: &rufs::Info, big_endian: bool, ea: bool) -> Found {
         size: info.frags * u64::from(info.fsize),
         block_size: info.fsize,
         volume: 0,
+        on_request: false,
         summary: describe_ufs(info, big_endian, ea),
     }
 }

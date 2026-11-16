@@ -1,4 +1,4 @@
-# winfsp-ufs: repo, build, CI
+# ufsmount: repo, build, CI
 
 ufsmount mounts FreeBSD UFS2 file systems read-only on Windows through WinFsp.
 Write support is not a feature. UFS1 is not supported (rufs has no UFS1).

@@ -1,4 +1,4 @@
-# winfsp-ufs: vendored rufs
+# ufsmount: vendored rufs
 
 - `vendor/fuse-ufs` is upstream fuse-ufs (github.com/realchonk/fuse-ufs), a squashed git subtree.
 - Our changes there are separate commits that touch only `vendor/fuse-ufs`.

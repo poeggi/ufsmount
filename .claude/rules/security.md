@@ -1,4 +1,4 @@
-# winfsp-ufs: security rules
+# ufsmount: security rules
 
 Raw disk reads and global drive letters need admin rights. The tray and the launcher mode run elevated.
 

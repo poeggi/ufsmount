@@ -13,7 +13,7 @@ pub static PRODUCT: Product = Product {
     fs_variant: "UFS2",
     launcher_class: "ufs",
     first_letter: 'U',
-    repo: "poeggi/winfsp-ufs",
+    repo: "poeggi/ufsmount",
     version: env!("CARGO_PKG_VERSION"),
     description: env!("CARGO_PKG_DESCRIPTION"),
     about: "Mounts FreeBSD UFS2 disks read-only.",

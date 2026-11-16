@@ -1,4 +1,4 @@
-# winfsp-ufs
+# ufsmount
 
 <img src="products/ufsmount/logos/logo.svg" width="96" alt="ufsmount logo">
 
@@ -9,10 +9,10 @@ Proven on real hardware: a 500 GB FreeBSD UFS2 USB disk with soft updates.
 Its whole tree (about 20,000 files, 108 GB) lists correctly.
 Plugging in, unplugging and Eject work too.
 
-**Download:** [latest release](https://github.com/poeggi/winfsp-ufs/releases/latest)
+**Download:** [latest release](https://github.com/poeggi/ufsmount/releases/latest)
 (setup, `SHA256SUMS`, licenses).
 The command-line tool alone:
-[ufsmount.exe](https://github.com/poeggi/winfsp-ufs/releases/latest/download/ufsmount.exe).
+[ufsmount.exe](https://github.com/poeggi/ufsmount/releases/latest/download/ufsmount.exe).
 
 ## Requirements
 

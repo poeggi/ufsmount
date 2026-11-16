@@ -1,4 +1,4 @@
-# winfsp-ufs: setup and tray
+# ufsmount: setup and tray
 
 ## Setup (Inno Setup 7.1.1)
 - `products/ufsmount/installer.iss` holds the product's defines (name, AppGuid, repo, launcher class) and

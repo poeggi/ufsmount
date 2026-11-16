@@ -1,7 +1,7 @@
 ufsmount - third-party notices
 
 ufsmount is licensed under the GNU Affero General Public License v3.0 or
-later (LICENSE.txt). Source: https://github.com/poeggi/winfsp-ufs
+later (LICENSE.txt). Source: https://github.com/poeggi/ufsmount
 
 ufsmount.exe and ufsmount-tray.exe contain the following third-party
 software. The license texts named below are in the files next to this one.

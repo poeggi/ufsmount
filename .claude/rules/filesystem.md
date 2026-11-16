@@ -1,4 +1,4 @@
-# winfsp-ufs: file system behaviour
+# ufsmount: file system behaviour
 
 - Read-only. Every writing WinFsp callback returns `STATUS_MEDIA_WRITE_PROTECTED`.
   `read_only_volume` alone enforces nothing.

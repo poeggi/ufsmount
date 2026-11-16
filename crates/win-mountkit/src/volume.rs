@@ -21,6 +21,8 @@ const DIR_MAX_ENTRIES: usize = 1_000_000;
 const DIR_MAX_NAME_BYTES: usize = 256 << 20;
 /// Symlinks followed while resolving one path, in total (MAXSYMLINKS on FreeBSD).
 const MAX_LINKS: u32 = 32;
+/// Symlinks whose kind is remembered; the cache is cleared when full.
+const LINK_CACHE_ENTRIES: usize = 65_536;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -201,6 +203,9 @@ pub fn filetime(t: SystemTime) -> u64 {
 pub struct Volume {
     fs: Mutex<Box<dyn Fs>>,
     dirs: Mutex<DirCache>,
+    /// Whether a symlink, by its directory and id, resolves to a directory.
+    /// A hard-linked symlink can resolve differently in each directory.
+    links: Mutex<HashMap<(NodeId, NodeId), bool>>,
     dev: Arc<Device>,
     root: NodeId,
     pub info: Info,
@@ -234,6 +239,7 @@ impl Volume {
                 entries: 0,
                 clock: 0,
             }),
+            links: Mutex::new(HashMap::new()),
             dev,
             charset,
         }
@@ -389,13 +395,37 @@ impl Volume {
             change: s.change,
         };
         if attr.is_symlink {
-            attr.link_to_dir = self
-                .readlink(node.id)
-                .ok()
-                .and_then(|target| self.resolve_target(node.parent, &target))
-                .is_some_and(|kind| kind == Kind::Dir);
+            attr.link_to_dir = self.link_to_dir(node);
         }
         Ok(attr)
+    }
+
+    /// Whether symlink `node` resolves to a directory. Remembered: a target
+    /// kept in a data block costs a seek. An error is not remembered.
+    fn link_to_dir(&self, node: &Node) -> bool {
+        let key = (node.parent, node.id);
+        let cached = self
+            .links
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .copied();
+        if let Some(to_dir) = cached {
+            return to_dir;
+        }
+        let resolved = self
+            .readlink(node.id)
+            .and_then(|target| self.resolve_target(node.parent, &target));
+        let Ok(kind) = resolved else {
+            return false;
+        };
+        let to_dir = kind == Some(Kind::Dir);
+        let mut links = self.links.lock().unwrap_or_else(PoisonError::into_inner);
+        if links.len() >= LINK_CACHE_ENTRIES {
+            links.clear();
+        }
+        links.insert(key, to_dir);
+        to_dir
     }
 
     /// Attributes for a listing: an unreadable entry is shown with zero size
@@ -438,10 +468,11 @@ impl Volume {
     }
 
     /// Follow a symlink target from directory `dir`; the kind it ends at.
-    fn resolve_target(&self, dir: NodeId, target: &[u8]) -> Option<Kind> {
+    fn resolve_target(&self, dir: NodeId, target: &[u8]) -> Result<Option<Kind>> {
         let mut budget = MAX_LINKS;
-        self.resolve_node(dir, target, &mut budget)
-            .map(|(_, kind)| kind)
+        Ok(self
+            .resolve_node(dir, target, &mut budget)?
+            .map(|(_, kind)| kind))
     }
 
     /// Resolve a path typed by the user: names as on the disk, `/` or `\`
@@ -455,7 +486,7 @@ impl Volume {
                 self.root,
                 path.trim_start_matches('/').as_bytes(),
                 &mut budget,
-            )
+            )?
             .ok_or(Error::NotFound)?;
         Ok(Node {
             id,
@@ -464,14 +495,14 @@ impl Volume {
         })
     }
 
-    /// Follow `target` from `dir`. `budget` caps the symlinks followed in
-    /// total, over all nesting levels.
+    /// Follow `target` from `dir`; None if it ends nowhere. `budget` caps the
+    /// symlinks followed in total, over all nesting levels.
     fn resolve_node(
         &self,
         mut dir: NodeId,
         target: &[u8],
         budget: &mut u32,
-    ) -> Option<(NodeId, Kind)> {
+    ) -> Result<Option<(NodeId, Kind)>> {
         let mut target = target;
         if target.first() == Some(&b'/') {
             target = self.strip_mount_point(target);
@@ -483,27 +514,35 @@ impl Volume {
             .collect();
         for (i, comp) in comps.iter().enumerate() {
             if *comp == b".." {
-                dir = self.dir(dir).ok()?.parent;
+                dir = self.dir(dir)?.parent;
                 continue;
             }
-            let table = self.dir(dir).ok()?;
-            let entry = table.find_raw(comp)?;
+            let table = self.dir(dir)?;
+            let Some(entry) = table.find_raw(comp) else {
+                return Ok(None);
+            };
             let (id, kind) = if entry.kind == Kind::Symlink {
-                *budget = budget.checked_sub(1)?;
-                let link = self.readlink(entry.id).ok()?;
-                self.resolve_node(dir, &link, budget)?
+                let Some(left) = budget.checked_sub(1) else {
+                    return Ok(None);
+                };
+                *budget = left;
+                let link = self.readlink(entry.id)?;
+                match self.resolve_node(dir, &link, budget)? {
+                    Some(found) => found,
+                    None => return Ok(None),
+                }
             } else {
                 (entry.id, entry.kind)
             };
             if i + 1 == comps.len() {
-                return Some((id, kind));
+                return Ok(Some((id, kind)));
             }
             if kind != Kind::Dir {
-                return None;
+                return Ok(None);
             }
             dir = id;
         }
-        Some((dir, Kind::Dir))
+        Ok(Some((dir, Kind::Dir)))
     }
 
     /// A symlink target as a Windows reparse target: `\` separators, names
@@ -541,7 +580,11 @@ impl Volume {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+    use crate::device::testing::FakeDisk;
+    use crate::fs::Stat;
 
     fn w(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
@@ -591,5 +634,115 @@ mod tests {
     fn errno_names() {
         let e = io::Error::from_raw_os_error(2);
         assert_eq!(describe(&e), "DEMO error ENOENT");
+    }
+
+    /// Root 2 holds directory "sub" (3) and symlink "link" (4) to `target`;
+    /// "sub" holds a hard link of the same symlink. Reading "sub" fails
+    /// `sub_errors` times.
+    struct Links {
+        reads: Arc<AtomicUsize>,
+        target: &'static [u8],
+        sub_errors: usize,
+    }
+
+    fn volume(fs: Links) -> Volume {
+        let dev = FakeDisk::new(vec![0; 4096], 512).into_device();
+        Volume::new(dev, Box::new(fs), Charset::Utf8)
+    }
+
+    impl Fs for Links {
+        fn info(&self) -> Info {
+            Info {
+                fs: "TEST",
+                label: Vec::new(),
+                serial: 0,
+                block_size: 512,
+                total: 0,
+                free: 0,
+                mount_point: Vec::new(),
+            }
+        }
+        fn root(&self) -> NodeId {
+            2
+        }
+        fn stat(&mut self, id: NodeId) -> io::Result<Stat> {
+            let kind = if id == 4 { Kind::Symlink } else { Kind::Dir };
+            Ok(Stat {
+                kind,
+                size: 3,
+                alloc: 0,
+                nlink: 2,
+                creation: 0,
+                access: 0,
+                write: 0,
+                change: 0,
+            })
+        }
+        fn read_dir(
+            &mut self,
+            dir: NodeId,
+            f: &mut dyn FnMut(&[u8], NodeId, Kind) -> bool,
+        ) -> io::Result<()> {
+            if dir == 3 && self.sub_errors > 0 {
+                self.sub_errors -= 1;
+                return Err(io::Error::from_raw_os_error(5));
+            }
+            let mut items = vec![(&b".."[..], 2, Kind::Dir), (b"link", 4, Kind::Symlink)];
+            if dir == 2 {
+                items.push((b"sub", 3, Kind::Dir));
+            }
+            for (name, id, kind) in items {
+                if f(name, id, kind) {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        fn read(&mut self, _: NodeId, _: u64, _: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+        fn read_link(&mut self, _: NodeId) -> io::Result<Vec<u8>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            Ok(self.target.to_vec())
+        }
+    }
+
+    #[test]
+    fn symlink_kind_is_remembered_per_directory() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let vol = volume(Links {
+            reads: reads.clone(),
+            target: b"sub",
+            sub_errors: 0,
+        });
+        let in_root = vol.lookup(&w("link")).unwrap();
+        let in_sub = vol.lookup(&w("sub/link")).unwrap();
+        for _ in 0..2 {
+            assert!(vol.attr(&in_root).unwrap().link_to_dir);
+        }
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            1,
+            "read once, then remembered"
+        );
+        for _ in 0..2 {
+            assert!(
+                !vol.attr(&in_sub).unwrap().link_to_dir,
+                "sub/sub does not exist"
+            );
+        }
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn symlink_kind_error_is_not_remembered() {
+        let vol = volume(Links {
+            reads: Arc::default(),
+            target: b"sub/..",
+            sub_errors: 1,
+        });
+        let link = vol.lookup(&w("link")).unwrap();
+        assert!(!vol.attr(&link).unwrap().link_to_dir, "reading sub failed");
+        assert!(vol.attr(&link).unwrap().link_to_dir);
     }
 }

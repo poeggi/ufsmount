@@ -73,8 +73,8 @@ fn describe_ufs(info: &rufs::Info, big_endian: bool, ea: bool) -> String {
         info.fsize / 1024,
         human_size(info.frags * u64::from(info.fsize)),
     );
-    if !info.volname.is_empty() {
-        s += &format!(", label \"{}\"", info.volname.escape_ascii());
+    if !info.label.is_empty() {
+        s += &format!(", label \"{}\"", info.label.escape_ascii());
     }
     if !info.fsmnt.is_empty() {
         s += &format!(", last mounted on {}", info.fsmnt.escape_ascii());
@@ -453,7 +453,7 @@ impl Fs for UfsFs {
         let i = &self.info;
         let fsize = u64::from(i.fsize);
         Info {
-            label: i.volname.clone(),
+            label: i.label.clone(),
             serial: i.id[0] ^ i.id[1],
             block_size: i.fsize,
             total: i.blocks.saturating_mul(fsize),

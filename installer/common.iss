@@ -22,6 +22,8 @@ VersionInfoVersion={#AppVersion}
 DefaultDirName={autopf}\{#AppName}
 DisableDirPage=yes
 DisableProgramGroupPage=yes
+; The tasks page installs: a Ready page would only repeat it.
+DisableReadyPage=yes
 DirExistsWarning=no
 PrivilegesRequired=admin
 MinVersion=10.0
@@ -295,6 +297,14 @@ procedure CurPageChanged(CurPageID: Integer);
 var
   SignIn: String;
 begin
+  { Without the Ready page the button captions are set here, as the help
+    for DisableReadyPage shows. }
+  if CurPageID = wpSelectTasks then
+    WizardForm.NextButton.Caption := SetupMessage(msgButtonInstall)
+  else if CurPageID = wpFinished then
+    WizardForm.NextButton.Caption := SetupMessage(msgButtonFinish)
+  else
+    WizardForm.NextButton.Caption := SetupMessage(msgButtonNext);
   { Keep the installed launcher registration and "Start at sign-in", unless
     the command line sets the tasks. Silent installs pass this page too. }
   if (CurPageID = wpSelectTasks) and not TasksChecked then begin

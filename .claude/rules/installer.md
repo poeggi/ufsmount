@@ -14,6 +14,8 @@
   `<ProgramData>\ufsmount\start-at-sign-in` says ("1" or "0", written with each task).
   The tray's "Start at sign-in" changes it. Silent installs pass the tasks page too (CI checks it).
   `/TASKS=` or `/MERGETASKS=` win over both.
+- No Ready to Install page (`DisableReadyPage`): the tasks page is the last one, and `CurPageChanged`
+  sets its button to Install.
 - An older version over a newer one asks first. Silent installs need `/ALLOWDOWNGRADE` for it.
 - PATH is edited by `ufsmount-tray --add-to-path` and `--remove-from-path`, which keep the registry type.
   Pascal script cannot read that type.

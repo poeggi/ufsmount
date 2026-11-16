@@ -5,6 +5,10 @@
 Mount a FreeBSD UFS2 disk on Windows as a read-only drive.
 Explorer, copy and robocopy work as on any drive.
 
+Proven on real hardware: a 500 GB FreeBSD UFS2 USB disk with soft updates.
+Its whole tree (about 20,000 files, 108 GB) lists correctly.
+Plugging in, unplugging and Eject work too.
+
 **Download:** [latest release](https://github.com/poeggi/winfsp-ufs/releases/latest)
 (setup, `SHA256SUMS`, licenses).
 The command-line tool alone:
@@ -42,6 +46,9 @@ Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
 - Plugging in a disk mounts it. Unplugging unmounts it.
 - "Eject" (Safely Remove Hardware) works on a mounted disk: it is unmounted first.
 - Right-click the icon: Open or Unmount a drive, Rescan disks, Quit (unmounts all).
+- "Drive letter" in a drive's menu moves it to another letter. The letter is remembered for that file system.
+- "Mount automatically" is on by default. Turned off, found file systems wait under "Not mounted".
+  Unmounted ones wait there too. "Mount on" or "Mount as" mounts one.
 - "Start at sign-in" in that menu starts it at every sign-in. The setup has the same choice.
 - About shows the versions and asks GitHub once whether a newer release exists. Nothing is downloaded.
 - Log: `C:\ProgramData\ufsmount\tray\tray.log`.

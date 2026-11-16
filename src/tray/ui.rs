@@ -30,13 +30,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_HANDLE, DBT_DEVTYP_VOLUME,
     DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR,
     DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
-    DispatchMessageW, FindWindowW, GetMessageW, HICON, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR,
-    LoadImageW, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
-    MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterDeviceNotificationW,
-    RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetTimer, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU,
-    WM_DESTROY, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_NULL,
-    WM_QUERYENDSESSION, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    DispatchMessageW, FindWindowW, GetMessageW, HICON, HMENU, IMAGE_ICON, KillTimer,
+    LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    MF_UNCHECKED, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
+    RegisterDeviceNotificationW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow,
+    SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_ENDSESSION, WM_NULL, WM_QUERYENDSESSION, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -57,7 +57,6 @@ const TIMER_ADD_ICON: usize = 1;
 const ID_RESCAN: u32 = 10;
 const ID_ABOUT: u32 = 11;
 const ID_QUIT: u32 = 12;
-const ID_SIGN_IN: u32 = 13;
 const ID_MOUNTS: u32 = 100;
 /// Longest wait for an unmount before an eject request is refused.
 const EJECT_WAIT: Duration = Duration::from_secs(10);
@@ -65,7 +64,50 @@ const EJECT_WAIT: Duration = Duration::from_secs(10);
 enum Action {
     Open(String),
     Unmount(u64),
+    Mount(u64, char),
+    Move(u64, char),
+    AutoMount(bool),
     SignIn(bool),
+}
+
+/// Menu commands from `ID_MOUNTS` on, and what each does.
+struct Actions {
+    next: u32,
+    list: Vec<(u32, Action)>,
+}
+
+impl Actions {
+    fn add(&mut self, action: Action) -> usize {
+        let id = self.next;
+        self.next += 1;
+        self.list.push((id, action));
+        id as usize
+    }
+}
+
+/// A submenu of drive letters: `current` checked, used ones grayed.
+/// SAFETY: call with a valid menu context, as `track_menu` does.
+unsafe fn letter_menu(
+    actions: &mut Actions,
+    letters: &[(char, bool)],
+    current: Option<char>,
+    action: impl Fn(char) -> Action,
+) -> Option<HMENU> {
+    // SAFETY: the new menu is appended to its parent, which destroys it.
+    unsafe {
+        let menu = CreatePopupMenu().ok()?;
+        for &(letter, free) in letters {
+            let text = HSTRING::from(format!("{letter}:"));
+            let _ = if Some(letter) == current {
+                AppendMenuW(menu, MF_STRING | MF_CHECKED, 0, &text)
+            } else if free {
+                AppendMenuW(menu, MF_STRING, actions.add(action(letter)), &text)
+            } else {
+                AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &text)
+            };
+        }
+        Some(menu)
+    }
 }
 
 struct App {
@@ -383,35 +425,64 @@ fn show_menu(x: i32, y: i32) {
 
 /// Show the menu; the chosen command (0 for none) and the mount actions.
 fn track_menu(hwnd: HWND, snap: &Snapshot, x: i32, y: i32) -> Option<(u32, Vec<(u32, Action)>)> {
-    let mut actions: Vec<(u32, Action)> = Vec::new();
+    let mut actions = Actions {
+        next: ID_MOUNTS,
+        list: Vec::new(),
+    };
+    let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
     // SAFETY: menu handles are created and destroyed here; strings live through each call.
     let cmd = unsafe {
         let menu = CreatePopupMenu().ok()?;
-        for (i, m) in snap.mounts.iter().enumerate() {
-            let open = ID_MOUNTS + 2 * i as u32;
+        for m in &snap.mounts {
             if let Ok(sub) = CreatePopupMenu() {
-                let _ = AppendMenuW(sub, MF_STRING, open as usize, w!("Open"));
-                let _ = AppendMenuW(sub, MF_STRING, open as usize + 1, w!("Unmount"));
+                let open = actions.add(Action::Open(m.letter.clone()));
+                let _ = AppendMenuW(sub, MF_STRING, open, w!("Open"));
+                let unmount = actions.add(Action::Unmount(m.id));
+                let _ = AppendMenuW(sub, MF_STRING, unmount, w!("Unmount"));
+                let current = m.letter.chars().next();
+                let id = m.id;
+                if let Some(letters) = letter_menu(&mut actions, &snap.letters, current, |l| {
+                    Action::Move(id, l)
+                }) {
+                    let _ = AppendMenuW(sub, MF_POPUP, letters.0 as usize, w!("Drive letter"));
+                }
                 let label = HSTRING::from(format!("{}   {}", m.letter, m.label));
                 let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, &label);
             }
-            actions.push((open, Action::Open(m.letter.clone())));
-            actions.push((open + 1, Action::Unmount(m.id)));
         }
-        if snap.mounts.is_empty() {
+        if !snap.idle.is_empty() {
+            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("Not mounted"));
+        } else if snap.mounts.is_empty() {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("No UFS disk mounted"));
+        }
+        for i in &snap.idle {
+            if let Ok(sub) = CreatePopupMenu() {
+                if let Some(l) = i.letter {
+                    let text = HSTRING::from(format!("Mount on {l}:"));
+                    let _ = AppendMenuW(sub, MF_STRING, actions.add(Action::Mount(i.id, l)), &text);
+                }
+                let id = i.id;
+                if let Some(letters) =
+                    letter_menu(&mut actions, &snap.letters, None, |l| Action::Mount(id, l))
+                {
+                    let _ = AppendMenuW(sub, MF_POPUP, letters.0 as usize, w!("Mount as"));
+                }
+                let label = HSTRING::from(format!("      {}", i.label));
+                let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, &label);
+            }
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, ID_RESCAN as usize, w!("Rescan disks"));
+        let auto = actions.add(Action::AutoMount(!snap.auto_mount));
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING | check(snap.auto_mount),
+            auto,
+            w!("Mount automatically"),
+        );
         if let Some(on) = snap.sign_in {
-            let check = if on { MF_CHECKED } else { MF_UNCHECKED };
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING | check,
-                ID_SIGN_IN as usize,
-                w!("Start at sign-in"),
-            );
-            actions.push((ID_SIGN_IN, Action::SignIn(!on)));
+            let sign_in = actions.add(Action::SignIn(!on));
+            let _ = AppendMenuW(menu, MF_STRING | check(on), sign_in, w!("Start at sign-in"));
         }
         let _ = AppendMenuW(menu, MF_STRING, ID_ABOUT as usize, w!("About"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -431,7 +502,7 @@ fn track_menu(hwnd: HWND, snap: &Snapshot, x: i32, y: i32) -> Option<(u32, Vec<(
         let _ = DestroyMenu(menu);
         cmd
     };
-    Some((cmd, actions))
+    Some((cmd, actions.list))
 }
 
 fn act(hwnd: HWND, cmd: u32, actions: Vec<(u32, Action)>) {
@@ -453,6 +524,9 @@ fn act(hwnd: HWND, cmd: u32, actions: Vec<(u32, Action)>) {
                 }
             }
             Some(Action::Unmount(id)) => send(Cmd::Unmount(id)),
+            Some(Action::Mount(id, letter)) => send(Cmd::Mount(id, letter)),
+            Some(Action::Move(id, letter)) => send(Cmd::Move(id, letter)),
+            Some(Action::AutoMount(on)) => send(Cmd::AutoMount(on)),
             Some(Action::SignIn(on)) => send(Cmd::SignIn(on)),
             None => {}
         },

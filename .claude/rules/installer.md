@@ -31,7 +31,11 @@
 - Each worker command runs under `catch_unwind`; a panic becomes an "Internal error" note.
 - A disk arrival forgets which removable-media disks (card readers) held no UFS, so a swapped card is
   probed again. Fixed disks are not probed again: that would wake a sleeping disk.
-- A mount the user unmounted stays unmounted until the disk is plugged in again or "Rescan" is clicked.
+- "Mount automatically" (default on, `<ProgramData>\ufsmount\auto-mount`): when off, found file systems
+  are listed under "Not mounted". A file system the user unmounted is listed there too and is not
+  mounted automatically until "Rescan" or a new plug-in. Listed ones hold no disk handle open.
+- A letter the user picks ("Mount as", "Drive letter") is remembered per UFS id in
+  `<ProgramData>\ufsmount\letters`; automatic mounts try it first when it is free.
 - Each mounted disk's handle is registered for removal requests (DBT_DEVTYP_HANDLE). On
   DBT_DEVICEQUERYREMOVE (Eject) the tray unmounts every mount of that disk and closes it before it
   answers, else the open handle blocks the eject. After 10 s it refuses and mounts the disk again.

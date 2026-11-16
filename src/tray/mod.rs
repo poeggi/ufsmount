@@ -10,6 +10,7 @@ mod about;
 mod instance;
 pub mod log;
 mod path;
+mod settings;
 pub mod sys;
 pub mod task;
 mod ui;

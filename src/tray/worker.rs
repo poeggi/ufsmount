@@ -31,6 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PWSTR};
 
+use super::settings::{self, FsId};
 use super::task;
 use crate::device::{Device, Source};
 use crate::names::Charset;
@@ -58,6 +59,12 @@ pub enum Cmd {
     Removed,
     /// The user unmounted this mount.
     Unmount(u64),
+    /// Mount this file system from the "Not mounted" list on this letter.
+    Mount(u64, char),
+    /// Move this mount to this letter.
+    Move(u64, char),
+    /// Mount file systems as they are found, or list them as not mounted.
+    AutoMount(bool),
     /// The watcher found the disk of this mount gone.
     Gone(u64),
     /// Start the tray at sign-in, or not.
@@ -76,12 +83,25 @@ pub struct MountView {
     pub label: String,
 }
 
+/// A file system that was found but is not mounted.
+#[derive(Clone)]
+pub struct IdleView {
+    pub id: u64,
+    pub label: String,
+    /// The letter "Mount on" offers.
+    pub letter: Option<char>,
+}
+
 /// A message for the user: title, text, warning.
 pub type Note = (String, String, bool);
 
 #[derive(Clone, Default)]
 pub struct Snapshot {
     pub mounts: Vec<MountView>,
+    pub idle: Vec<IdleView>,
+    /// The drive letters mounts may use, in order, and whether each is free.
+    pub letters: Vec<(char, bool)>,
+    pub auto_mount: bool,
     pub notes: Vec<Note>,
     /// Shown in the tooltip when no drive is mounted.
     pub status: String,
@@ -98,7 +118,15 @@ pub struct Shared {
 }
 
 /// One file system, identified across scans by disk, offset and UFS id.
-type Key = (u32, u64, [u32; 2]);
+type Key = (u32, u64, FsId);
+
+/// A file system that was found but is not mounted. Its disk is not kept open.
+struct Idle {
+    id: u64,
+    key: Key,
+    disk: Option<u32>,
+    label: String,
+}
 
 struct Active {
     id: u64,
@@ -164,6 +192,17 @@ pub fn letter_order(used: u32, network: &[char]) -> Vec<char> {
     std::iter::once('U')
         .chain(('D'..='T').rev())
         .filter(|&c| used & (1 << (c as u32 - 'A' as u32)) == 0 && !network.contains(&c))
+        .collect()
+}
+
+/// The letters an automatic mount tries: the one chosen before if it is
+/// free, then the first free ones, `n` in all.
+fn preferred(chosen: Option<char>, free: &[char], n: usize) -> Vec<char> {
+    chosen
+        .filter(|c| free.contains(c))
+        .into_iter()
+        .chain(free.iter().copied().filter(|&c| Some(c) != chosen))
+        .take(n)
         .collect()
 }
 
@@ -248,10 +287,15 @@ struct Worker {
     sd: SecurityDescriptor,
     source: Option<PathBuf>,
     actives: Vec<Active>,
+    idle: Vec<Idle>,
     next_id: u64,
+    /// File systems the user unmounted: not mounted automatically again.
     unmounted: HashSet<Key>,
     /// Disks probed without finding UFS, and whether their media is removable.
     no_ufs: HashMap<u32, bool>,
+    auto_mount: bool,
+    /// The letter the user chose for each file system.
+    letters: HashMap<FsId, char>,
     notes: Vec<Note>,
     status: String,
     last_warning: Option<String>,
@@ -275,9 +319,12 @@ impl Worker {
             sd,
             source,
             actives: Vec::new(),
+            idle: Vec::new(),
             next_id: 1,
             unmounted: HashSet::new(),
             no_ufs: HashMap::new(),
+            auto_mount: true,
+            letters: HashMap::new(),
             notes: Vec::new(),
             status: String::new(),
             last_warning: None,
@@ -305,6 +352,13 @@ impl Worker {
         };
     }
 
+    fn free_letters(&self) -> Vec<char> {
+        letter_order(
+            self.used_letters(),
+            &network_letters(self.user_sid.as_deref()),
+        )
+    }
+
     fn publish(&mut self) {
         let mounts = self
             .actives
@@ -315,9 +369,28 @@ impl Worker {
                 label: a.label.clone(),
             })
             .collect();
+        let free = self.free_letters();
+        let idle = self
+            .idle
+            .iter()
+            .map(|i| IdleView {
+                id: i.id,
+                label: i.label.clone(),
+                letter: preferred(self.letters.get(&i.key.2).copied(), &free, 1)
+                    .first()
+                    .copied(),
+            })
+            .collect();
+        let letters = letter_order(0, &[])
+            .into_iter()
+            .map(|l| (l, free.contains(&l)))
+            .collect();
         {
             let mut snap = self.shared.snap.lock().unwrap_or_else(|e| e.into_inner());
             snap.mounts = mounts;
+            snap.idle = idle;
+            snap.letters = letters;
+            snap.auto_mount = self.auto_mount;
             snap.notes.append(&mut self.notes);
             let extra = snap.notes.len().saturating_sub(MAX_NOTES);
             snap.notes.drain(..extra);
@@ -338,26 +411,33 @@ impl Worker {
         used
     }
 
-    /// Mount one UFS2 file system on the first free letter that works.
-    fn mount(&mut self, disk: Option<u32>, dev: &Arc<Device>, cand: &Candidate) {
+    fn add_idle(&mut self, key: Key, disk: Option<u32>, label: String) {
+        if !self.idle.iter().any(|i| i.key == key) {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.idle.push(Idle {
+                id,
+                key,
+                disk,
+                label,
+            });
+        }
+    }
+
+    /// Mount one UFS2 file system on `want`. Without it (an automatic mount)
+    /// on the letter chosen before or the first free one that works, and only
+    /// when automatic mounting is on and the user did not unmount it.
+    /// A file system that is not mounted is listed as idle.
+    fn mount(
+        &mut self,
+        disk: Option<u32>,
+        dev: &Arc<Device>,
+        cand: &Candidate,
+        want: Option<char>,
+    ) {
         let Some(facts) = cand.ufs2() else { return };
         let key = (disk.unwrap_or(u32::MAX), cand.start, facts.info.id);
-        if self.unmounted.contains(&key) || self.actives.iter().any(|a| a.key == key) {
-            return;
-        }
-        if self.actives.len() >= MAX_MOUNTS {
-            if std::mem::replace(&mut self.cap_warned, true) {
-                return;
-            }
-            self.note(
-                "Too many file systems",
-                format!(
-                    "{} {} is not mounted (limit {MAX_MOUNTS})",
-                    dev.name(),
-                    cand.id
-                ),
-                true,
-            );
+        if self.actives.iter().any(|a| a.key == key) {
             return;
         }
         let name = match disk {
@@ -369,19 +449,32 @@ impl Worker {
             cand.id,
             human_size(facts.info.frags * u64::from(facts.info.fsize))
         );
+        if want.is_none() && (!self.auto_mount || self.unmounted.contains(&key)) {
+            self.add_idle(key, disk, label);
+            return;
+        }
+        if self.actives.len() >= MAX_MOUNTS {
+            self.add_idle(key, disk, label.clone());
+            if want.is_some() || !std::mem::replace(&mut self.cap_warned, true) {
+                let text = format!("{label} is not mounted (limit {MAX_MOUNTS})");
+                self.note("Too many file systems", text, true);
+            }
+            return;
+        }
         let vol = match Volume::open(dev.clone(), cand, Charset::Utf8) {
             Ok(v) => Arc::new(v),
             Err(e) => {
+                self.add_idle(key, disk, label.clone());
                 self.note("Cannot open", format!("{label}: {e:#}"), true);
                 return;
             }
         };
-        let network = network_letters(self.user_sid.as_deref());
+        let tries = match want {
+            Some(l) => vec![l],
+            None => preferred(self.letters.get(&key.2).copied(), &self.free_letters(), 3),
+        };
         let mut last_err = None;
-        for letter in letter_order(self.used_letters(), &network)
-            .into_iter()
-            .take(3)
-        {
+        for letter in tries {
             let target = format!("{letter}:");
             match Mount::start(vol.clone(), self.sd.clone(), None, Some(&target), true) {
                 Ok(mount) => {
@@ -391,6 +484,11 @@ impl Worker {
                     let watcher = spawn_watcher(id, dev.clone(), stop.clone(), self.tx.clone());
                     log::info!("mounted {label} on {target}");
                     self.note("Mounted", format!("{target}  {label}"), false);
+                    self.idle.retain(|i| i.key != key);
+                    self.unmounted.remove(&key);
+                    if want.is_some() && self.letters.insert(key.2, letter) != Some(letter) {
+                        settings::save_letters(&self.letters);
+                    }
                     self.actives.push(Active {
                         id,
                         key,
@@ -412,7 +510,45 @@ impl Worker {
             }
         }
         let why = last_err.map_or("no free drive letter".to_string(), |e| format!("{e:#}"));
+        self.add_idle(key, disk, label.clone());
         self.note("Cannot mount", format!("{label}: {why}"), true);
+    }
+
+    /// Mount a file system found before: its disk is probed again, and only
+    /// the same file system (offset and UFS id) is mounted.
+    fn remount(
+        &mut self,
+        key: Key,
+        disk: Option<u32>,
+        dev: Option<Arc<Device>>,
+        want: Option<char>,
+    ) {
+        let dev = match dev {
+            Some(d) => d,
+            None => {
+                let source = match (disk, &self.source) {
+                    (Some(n), _) => Source::PhysicalDrive(n),
+                    (None, Some(path)) => Source::Image(path.clone()),
+                    (None, None) => return,
+                };
+                match Device::open(&source, None) {
+                    Ok(d) => Arc::new(d),
+                    Err(e) => {
+                        self.note("Cannot mount", format!("{e:#}"), true);
+                        return;
+                    }
+                }
+            }
+        };
+        let same = |c: &Candidate| c.start == key.1 && c.ufs2().is_some_and(|f| f.info.id == key.2);
+        match partition::probe(&dev).into_iter().find(same) {
+            Some(c) => self.mount(disk, &dev, &c, want),
+            None => {
+                self.idle.retain(|i| i.key != key);
+                let text = format!("{}: the file system is gone. Use Rescan.", dev.name());
+                self.note("Not found", text, true);
+            }
+        }
     }
 
     fn scan_disk(&mut self, n: u32) {
@@ -442,14 +578,15 @@ impl Worker {
             return;
         }
         for c in &ufs {
-            if catch_unwind(AssertUnwindSafe(|| self.mount(Some(n), &dev, c))).is_err() {
+            if catch_unwind(AssertUnwindSafe(|| self.mount(Some(n), &dev, c, None))).is_err() {
                 self.note("Mount failed", format!("PhysicalDrive{n} {}", c.id), true);
             }
         }
     }
 
-    /// Probe the disks. An automatic scan skips disks that have a mount or are
-    /// known to hold no UFS; a manual one probes all (mounts are deduplicated).
+    /// Probe the disks. An automatic scan skips disks that have a mount, are
+    /// listed as not mounted or are known to hold no UFS; a manual one probes
+    /// all (mounts and the list are deduplicated).
     fn scan(&mut self, manual: bool) {
         if let Some(path) = self.source.clone() {
             if self.actives.is_empty() {
@@ -459,7 +596,9 @@ impl Worker {
         }
         for n in 0..MAX_DISK {
             if !manual
-                && (self.no_ufs.contains_key(&n) || self.actives.iter().any(|a| a.disk == Some(n)))
+                && (self.no_ufs.contains_key(&n)
+                    || self.actives.iter().any(|a| a.disk == Some(n))
+                    || self.idle.iter().any(|i| i.disk == Some(n)))
             {
                 continue;
             }
@@ -474,6 +613,7 @@ impl Worker {
         let present = |n: u32| removable_media(n).is_some();
         self.no_ufs.retain(|&n, _| present(n));
         self.unmounted.retain(|k| k.0 == u32::MAX || present(k.0));
+        self.idle.retain(|i| i.disk.is_none_or(present));
     }
 
     fn scan_image(&mut self, path: PathBuf) {
@@ -486,7 +626,7 @@ impl Worker {
         };
         let cands = partition::probe(&dev);
         for c in cands.iter().filter(|c| c.ufs2().is_some()) {
-            self.mount(None, &dev, c);
+            self.mount(None, &dev, c, None);
         }
     }
 
@@ -530,16 +670,18 @@ impl Worker {
     fn handle(&mut self, cmd: Cmd, rescan_at: &mut Option<Instant>) -> Option<Sender<()>> {
         match cmd {
             Cmd::Rescan { manual } => {
+                let before = self.actives.len() + self.idle.len();
                 if manual {
                     self.unmounted.clear();
                     self.no_ufs.clear();
+                    self.idle.clear();
                     self.last_warning = None;
                     self.cap_warned = false;
                     self.retries_left = RETRIES;
                 }
-                let before = self.actives.len();
                 self.scan(manual);
-                if manual && self.actives.len() == before && self.notes.is_empty() {
+                let found = self.actives.len() + self.idle.len();
+                if manual && found <= before && self.notes.is_empty() {
                     self.note("ufsmount", "No new UFS file system found.".into(), false);
                 }
             }
@@ -547,6 +689,8 @@ impl Worker {
                 // A card reader keeps its disk number when the card is swapped.
                 // Fixed disks are not probed again: that would wake a sleeping disk.
                 self.no_ufs.retain(|_, removable| !*removable);
+                self.idle
+                    .retain(|i| i.disk.is_none_or(|n| removable_media(n) == Some(false)));
                 self.retries_left = RETRIES;
                 *rescan_at = Some(Instant::now() + DEBOUNCE);
             }
@@ -557,7 +701,36 @@ impl Worker {
             Cmd::Unmount(id) => {
                 if let Some(a) = self.take(id) {
                     self.unmounted.insert(a.key);
+                    self.add_idle(a.key, a.disk, a.label.clone());
                     a.stop();
+                }
+            }
+            Cmd::Mount(id, letter) => {
+                if let Some(i) = self.idle.iter().find(|i| i.id == id) {
+                    let (key, disk) = (i.key, i.disk);
+                    self.remount(key, disk, None, Some(letter));
+                }
+            }
+            Cmd::Move(id, letter) => {
+                if let Some(a) = self.take(id) {
+                    let (key, disk, dev) = (a.key, a.disk, a.dev.clone());
+                    a.stop();
+                    self.remount(key, disk, Some(dev), Some(letter));
+                }
+            }
+            Cmd::AutoMount(on) => {
+                self.auto_mount = on;
+                settings::set_auto_mount(on);
+                if on {
+                    let waiting: Vec<(Key, Option<u32>)> = self
+                        .idle
+                        .iter()
+                        .filter(|i| !self.unmounted.contains(&i.key))
+                        .map(|i| (i.key, i.disk))
+                        .collect();
+                    for (key, disk) in waiting {
+                        self.remount(key, disk, None, None);
+                    }
                 }
             }
             Cmd::Gone(id) => self.gone(id),
@@ -585,8 +758,10 @@ impl Worker {
 
     fn run(mut self, rx: Receiver<Cmd>) {
         self.sign_in = task::starts_at_sign_in();
+        self.auto_mount = settings::auto_mount();
+        self.letters = settings::letters();
         self.guard(|w| w.scan(false));
-        if self.actives.is_empty() && self.notes.is_empty() {
+        if self.actives.is_empty() && self.idle.is_empty() && self.notes.is_empty() {
             self.note(
                 "ufsmount",
                 "No UFS disk found. Plug one in or use Rescan.".into(),
@@ -706,6 +881,56 @@ mod tests {
         w.no_ufs.insert(999, false);
         assert!(w.handle(Cmd::Removed, &mut None).is_none());
         assert!(w.no_ufs.is_empty());
+    }
+
+    #[test]
+    fn preferred_letters() {
+        let free = ['U', 'T', 'S', 'R'];
+        assert_eq!(preferred(None, &free, 3), ['U', 'T', 'S']);
+        assert_eq!(preferred(Some('S'), &free, 3), ['S', 'U', 'T']);
+        assert_eq!(
+            preferred(Some('G'), &free, 3),
+            ['U', 'T', 'S'],
+            "chosen but used"
+        );
+        assert_eq!(preferred(Some('R'), &free, 1), ['R']);
+        assert!(preferred(Some('R'), &[], 1).is_empty());
+    }
+
+    #[test]
+    fn idle_file_systems_are_listed() {
+        let mut w = worker();
+        let id = [7, 7];
+        w.add_idle((999, 65536, id), Some(999), "disk 999".into());
+        w.add_idle((999, 65536, id), Some(999), "disk 999".into());
+        assert_eq!(w.idle.len(), 1, "listed once");
+        let chosen = w.free_letters()[1];
+        w.letters.insert(id, chosen);
+        w.publish();
+        {
+            let snap = w.shared.snap.lock().unwrap();
+            assert_eq!(snap.idle.len(), 1);
+            assert_eq!(
+                snap.idle[0].letter,
+                Some(chosen),
+                "the letter chosen before"
+            );
+            assert!(snap.auto_mount);
+            assert_eq!(snap.letters.first(), Some(&('U', snap.letters[0].1)));
+        }
+        // A disk that is gone leaves the list.
+        assert!(w.handle(Cmd::Removed, &mut None).is_none());
+        assert!(w.idle.is_empty());
+    }
+
+    #[test]
+    fn arrival_drops_idle_entries_of_removable_or_gone_disks() {
+        let mut w = worker();
+        w.add_idle((999, 0, [1, 1]), Some(999), "gone".into());
+        w.add_idle((u32::MAX, 0, [2, 2]), None, "image".into());
+        assert!(w.handle(Cmd::Arrived, &mut None).is_none());
+        assert_eq!(w.idle.len(), 1);
+        assert_eq!(w.idle[0].label, "image");
     }
 
     #[test]

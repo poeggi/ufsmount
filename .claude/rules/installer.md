@@ -34,7 +34,8 @@
 - "Mount automatically" (default on, `<ProgramData>\ufsmount\auto-mount`): when off, found file systems
   are listed under "Not mounted". A file system the user unmounted is listed there too and is not
   mounted automatically until "Rescan" or a new plug-in. Listed ones hold no disk handle open.
-- A letter the user picks ("Mount as", "Drive letter") is remembered per UFS id in
+  Automatic scans skip a fixed disk with listed file systems; a removable one is probed again.
+- A letter the user picks ("Mount on", "Mount as", "Drive letter") is remembered per UFS id in
   `<ProgramData>\ufsmount\letters`; automatic mounts try it first when it is free.
 - Each mounted disk's handle is registered for removal requests (DBT_DEVTYP_HANDLE). On
   DBT_DEVICEQUERYREMOVE (Eject) the tray unmounts every mount of that disk and closes it before it

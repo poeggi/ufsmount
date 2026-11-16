@@ -85,15 +85,15 @@ impl Actions {
     }
 }
 
-/// A submenu of drive letters: `current` checked, used ones grayed.
-/// SAFETY: call with a valid menu context, as `track_menu` does.
-unsafe fn letter_menu(
+/// A submenu of drive letters: `current` checked, used ones grayed. The
+/// caller appends it to a parent menu, which destroys it.
+fn letter_menu(
     actions: &mut Actions,
     letters: &[(char, bool)],
     current: Option<char>,
     action: impl Fn(char) -> Action,
 ) -> Option<HMENU> {
-    // SAFETY: the new menu is appended to its parent, which destroys it.
+    // SAFETY: plain menu calls; each string lives through its call.
     unsafe {
         let menu = CreatePopupMenu().ok()?;
         for &(letter, free) in letters {

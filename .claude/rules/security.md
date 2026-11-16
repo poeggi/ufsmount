@@ -40,9 +40,9 @@ Raw disk reads and global drive letters need admin rights. The tray and the laun
   A `-U` user that does not resolve stops the start. Never fall back to a wider security descriptor.
 - The launcher registration keeps WinFsp's default Security (SYSTEM and Administrators).
   Never grant Everyone: that exposes every raw disk.
-- A disk is never reopened by its number. A disk that is gone stops and unmounts its mount.
-  The tray's "Mount on" probes the disk number again and mounts only the same file system
-  (offset and UFS id), as a scan does.
+- A mounted disk is never reopened by its number. A disk that is gone stops and unmounts its mount.
+  A listed (not mounted) file system is opened by its disk number again and mounts only if
+  offset and UFS id match.
 
 ## Untrusted disks
 - A name never leaves its folder: `/` maps like the other forbidden characters, and `cp` refuses a name

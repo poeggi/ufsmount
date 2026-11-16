@@ -411,6 +411,15 @@ impl Worker {
         used
     }
 
+    /// Whether `letter` is free for a mount; else a note says why not.
+    fn letter_free(&mut self, letter: char) -> bool {
+        let free = self.free_letters().contains(&letter);
+        if !free {
+            self.note("Cannot mount", format!("{letter}: is in use"), true);
+        }
+        free
+    }
+
     fn add_idle(&mut self, key: Key, disk: Option<u32>, label: String) {
         if !self.idle.iter().any(|i| i.key == key) {
             let id = self.next_id;
@@ -424,10 +433,8 @@ impl Worker {
         }
     }
 
-    /// Mount one UFS2 file system on `want`. Without it (an automatic mount)
-    /// on the letter chosen before or the first free one that works, and only
-    /// when automatic mounting is on and the user did not unmount it.
-    /// A file system that is not mounted is listed as idle.
+    /// Mount one UFS2 file system on `want`, or automatically on its chosen
+    /// letter or a free one. Not mounted: listed as idle.
     fn mount(
         &mut self,
         disk: Option<u32>,
@@ -534,6 +541,7 @@ impl Worker {
                 match Device::open(&source, None) {
                     Ok(d) => Arc::new(d),
                     Err(e) => {
+                        self.idle.retain(|i| i.key != key);
                         self.note("Cannot mount", format!("{e:#}"), true);
                         return;
                     }
@@ -552,6 +560,8 @@ impl Worker {
     }
 
     fn scan_disk(&mut self, n: u32) {
+        // The probe lists this disk's file systems again.
+        self.idle.retain(|i| i.disk != Some(n));
         let dev = match Device::open(&Source::PhysicalDrive(n), None) {
             Ok(d) => Arc::new(d),
             Err(e) => {
@@ -598,7 +608,8 @@ impl Worker {
             if !manual
                 && (self.no_ufs.contains_key(&n)
                     || self.actives.iter().any(|a| a.disk == Some(n))
-                    || self.idle.iter().any(|i| i.disk == Some(n)))
+                    || (self.idle.iter().any(|i| i.disk == Some(n))
+                        && removable_media(n) == Some(false)))
             {
                 continue;
             }
@@ -689,8 +700,6 @@ impl Worker {
                 // A card reader keeps its disk number when the card is swapped.
                 // Fixed disks are not probed again: that would wake a sleeping disk.
                 self.no_ufs.retain(|_, removable| !*removable);
-                self.idle
-                    .retain(|i| i.disk.is_none_or(|n| removable_media(n) == Some(false)));
                 self.retries_left = RETRIES;
                 *rescan_at = Some(Instant::now() + DEBOUNCE);
             }
@@ -706,13 +715,22 @@ impl Worker {
                 }
             }
             Cmd::Mount(id, letter) => {
-                if let Some(i) = self.idle.iter().find(|i| i.id == id) {
-                    let (key, disk) = (i.key, i.disk);
+                let found = self
+                    .idle
+                    .iter()
+                    .find(|i| i.id == id)
+                    .map(|i| (i.key, i.disk));
+                if let Some((key, disk)) = found
+                    && self.letter_free(letter)
+                {
                     self.remount(key, disk, None, Some(letter));
                 }
             }
             Cmd::Move(id, letter) => {
-                if let Some(a) = self.take(id) {
+                // Checked first: a stale menu may offer a letter taken since.
+                if self.letter_free(letter)
+                    && let Some(a) = self.take(id)
+                {
                     let (key, disk, dev) = (a.key, a.disk, a.dev.clone());
                     a.stop();
                     self.remount(key, disk, Some(dev), Some(letter));
@@ -741,6 +759,9 @@ impl Worker {
                     .into_iter()
                     .partition(|a| a.dev.disk_handle() == Some(handle));
                 self.actives = keep;
+                // The next scan of the disk lists its file systems again.
+                let disks: Vec<Option<u32>> = eject.iter().map(|a| a.disk).collect();
+                self.idle.retain(|i| !disks.contains(&i.disk));
                 for a in eject {
                     log::info!("{}: removal requested", a.dev.name());
                     a.stop();
@@ -924,13 +945,27 @@ mod tests {
     }
 
     #[test]
-    fn arrival_drops_idle_entries_of_removable_or_gone_disks() {
+    fn arrival_keeps_the_list() {
         let mut w = worker();
-        w.add_idle((999, 0, [1, 1]), Some(999), "gone".into());
-        w.add_idle((u32::MAX, 0, [2, 2]), None, "image".into());
+        w.add_idle((999, 0, [1, 1]), Some(999), "a".into());
+        let id = w.idle[0].id;
         assert!(w.handle(Cmd::Arrived, &mut None).is_none());
         assert_eq!(w.idle.len(), 1);
-        assert_eq!(w.idle[0].label, "image");
+        assert_eq!(w.idle[0].id, id, "the menu's ids stay valid");
+    }
+
+    #[test]
+    fn letters_in_use_or_invalid_are_refused() {
+        let mut w = worker();
+        w.add_idle((999, 0, [1, 1]), Some(999), "a".into());
+        let id = w.idle[0].id;
+        for letter in ['C', 'Z', '@'] {
+            assert!(w.handle(Cmd::Mount(id, letter), &mut None).is_none());
+            assert!(w.handle(Cmd::Move(1234, letter), &mut None).is_none());
+        }
+        assert_eq!(w.idle.len(), 1, "nothing tried");
+        assert_eq!(w.notes.len(), 6);
+        assert!(w.notes.iter().all(|n| n.0 == "Cannot mount" && n.2));
     }
 
     #[test]

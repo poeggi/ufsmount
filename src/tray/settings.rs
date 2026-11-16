@@ -23,9 +23,8 @@ fn write(name: &str, text: &str) {
 /// "Mount automatically": on unless turned off.
 pub fn auto_mount() -> bool {
     file("auto-mount")
-        .and_then(|p| std::fs::read(p).ok())
-        .as_deref()
-        != Some(b"0")
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_none_or(|t| t.trim() != "0")
 }
 
 pub fn set_auto_mount(on: bool) {

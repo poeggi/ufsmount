@@ -65,6 +65,10 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppName}-tray.exe"; Commen
 [Run]
 Filename: "{app}\{#AppName}-tray.exe"; Description: "Start {#AppName}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
+[Messages]
+; The tasks page's button says Install (no Ready page).
+SelectTasksLabel2=Select the additional tasks you want Setup to perform while installing [name], then click Install.
+
 [Code]
 var
   TasksChecked: Boolean;
@@ -299,7 +303,7 @@ var
 begin
   { Without the Ready page the button captions are set here, as the help
     for DisableReadyPage shows. }
-  if CurPageID = wpSelectTasks then
+  if (CurPageID = wpSelectTasks) or (CurPageID = wpReady) then
     WizardForm.NextButton.Caption := SetupMessage(msgButtonInstall)
   else if CurPageID = wpFinished then
     WizardForm.NextButton.Caption := SetupMessage(msgButtonFinish)

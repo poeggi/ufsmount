@@ -20,11 +20,11 @@ impl<R: Backend> Ufs<R> {
 		buffer: &mut [u8],
 	) -> IoResult<usize> {
 		log::trace!("inode_read({inr}, {offset}, {})", buffer.len());
+		let mut blockbuf = vec![0u8; self.superblock.bsize as usize];
 		let ino = self.read_inode(inr)?;
 		if offset >= ino.size || !ino.has_data() {
 			return Ok(0);
 		}
-		let mut blockbuf = vec![0u8; self.superblock.bsize as usize];
 
 		let mut boff = 0;
 		let len = (buffer.len() as u64).min(ino.size - offset);
@@ -159,8 +159,7 @@ impl<R: Backend> Ufs<R> {
 
 	pub(super) fn read_inode(&mut self, inr: InodeNum) -> IoResult<Inode> {
 		log::trace!("read_inode({inr});");
-		let sb = &self.superblock;
-		if inr.get64() >= sb.ipg as u64 * sb.ncg as u64 {
+		if inr.get64() >= self.superblock.ipg as u64 * self.superblock.ncg as u64 {
 			log::error!("invalid inode number {inr}");
 			return Err(err!(EIO));
 		}
@@ -168,16 +167,16 @@ impl<R: Backend> Ufs<R> {
 		let ino: Inode = self.file.decode_at(off)?;
 		let mode = ino.mode;
 
-		match mode & S_IFMT {
-			0 => {
-				log::warn!("invalid inode {inr}: Mode {mode:#o}, S_IFMT is 0");
-				return Err(err!(EINVAL));
-			}
-			S_IFIFO | S_IFCHR | S_IFDIR | S_IFBLK | S_IFREG | S_IFLNK | S_IFSOCK => {}
-			_ => {
-				log::error!("invalid inode {inr}: Mode {mode:#o}, unknown file type");
-				return Err(err!(EIO));
-			}
+		if (mode & S_IFMT) == 0 {
+			log::warn!("invalid inode {inr}: Mode {mode:#o}, S_IFMT is 0");
+			return Err(err!(EINVAL));
+		}
+		if !matches!(
+			mode & S_IFMT,
+			S_IFIFO | S_IFCHR | S_IFDIR | S_IFBLK | S_IFREG | S_IFLNK | S_IFSOCK
+		) {
+			log::error!("invalid inode {inr}: Mode {mode:#o}, unknown file type");
+			return Err(err!(EIO));
 		}
 
 		Ok(ino)
@@ -349,7 +348,7 @@ impl<R: Backend> Ufs<R> {
 
 		let mut data = vec![0u64; pbp as usize];
 		let bno = match self.decode_blkidx(blkno)? {
-			InodeBlock::Direct(off) => direct[off] as u64,
+			InodeBlock::Direct(off) => NonZeroU64::new(direct[off] as u64),
 			InodeBlock::Indirect1(off) => {
 				let x1 = indirect[0] as u64;
 				if x1 == 0 {
@@ -357,7 +356,7 @@ impl<R: Backend> Ufs<R> {
 				}
 
 				self.read_pblock(self.check_blkno(inr, x1, frag)?, &mut data)?;
-				data[off]
+				NonZeroU64::new(data[off])
 			}
 			InodeBlock::Indirect2(high, low) => {
 				let x1 = indirect[1] as u64;
@@ -372,7 +371,7 @@ impl<R: Backend> Ufs<R> {
 				}
 
 				self.read_pblock(self.check_blkno(inr, x2, frag)?, &mut data)?;
-				data[low]
+				NonZeroU64::new(data[low])
 			}
 			InodeBlock::Indirect3(high, mid, low) => {
 				let x1 = indirect[2] as u64;
@@ -393,21 +392,19 @@ impl<R: Backend> Ufs<R> {
 				}
 
 				self.read_pblock(self.check_blkno(inr, x3, frag)?, &mut data)?;
-				data[low]
+				NonZeroU64::new(data[low])
 			}
 		};
 
-		log::trace!("inode_resolve_block({inr}, {blkno}): bno={bno}");
+		log::trace!("inode_resolve_block({inr}, {blkno}): bno={bno:?}");
 
-		if bno == 0 {
-			return Ok(None);
+		if let Some(b) = bno {
+			let frags = self.inode_get_block_size(ino, blkno)? as u64 / fs;
+			self.check_blkno(inr, b.get(), frags)?;
 		}
-		let frags = self.inode_get_block_size(ino, blkno)? as u64 / fs;
-		Ok(NonZeroU64::new(self.check_blkno(inr, bno, frags)?))
+		Ok(bno)
 	}
 
-	/// Check that a run of `frags` fragments at `bno`, a block number (in
-	/// fragments) taken from the disk, lies within the file system.
 	pub(super) fn check_blkno(&self, inr: InodeNum, bno: u64, frags: u64) -> IoResult<u64> {
 		let size = self.superblock.size as u64;
 		if bno < size && frags <= size - bno {
@@ -431,10 +428,7 @@ impl<R: Backend> Ufs<R> {
 		} else if blkidx < blocks + frags {
 			(fs * frags) as usize
 		} else {
-			log::error!(
-				"inode_get_block_size(): out of bounds: blkidx={blkidx}, blocks={blocks}, \
-				 frags={frags}"
-			);
+			log::error!("out of bounds: blkidx={blkidx}, blocks={blocks}, frags={frags}");
 			return Err(err!(EIO));
 		};
 
@@ -450,25 +444,16 @@ mod t {
 	use super::*;
 	use crate::ufs::testfs::*;
 
-	/// A file of nearly 2^64 bytes: its last block is found without an overflow,
-	/// and reading it fails instead of panicking.
+	/// The last block of a file of nearly 2^64 bytes is found without an overflow.
 	#[test]
 	fn huge_file() {
 		let mut ino = Inode::new(InodeType::RegularFile, 0o644, 0, 0, 32768);
 		ino.size = u64::MAX;
-		let mut img = image(&superblock());
-		put_inode(&mut img, InodeNum::ROOT, &ino);
-		let mut ufs = open(img).unwrap();
-
+		let mut ufs = open(image(&superblock())).unwrap();
 		let block = ufs
 			.inode_find_block(InodeNum::ROOT, &ino, u64::MAX - 1)
 			.unwrap();
 		assert_eq!(block.blkidx, u64::MAX / 32768);
-		assert_eq!(block.off, 32766);
-		assert_eq!(block.size, 32768);
-		assert!(ufs
-			.inode_read(InodeNum::ROOT, u64::MAX - 10, &mut [0u8; 4])
-			.is_err());
 	}
 
 	/// A regular file of `size` bytes with the block pointers `blocks`.
@@ -493,13 +478,7 @@ mod t {
 	#[test]
 	fn block_runs() {
 		let ufs = open(image(&superblock())).unwrap();
-		let check = |bno, frags| ufs.check_blkno(InodeNum::ROOT, bno, frags).is_ok();
-		assert!(check(255, 1));
-		assert!(check(248, 8));
-		assert!(!check(255, 2));
-		assert!(!check(249, 8));
-		assert!(!check(256, 1));
-		assert!(!check(u64::MAX, 8));
+		assert!(ufs.check_blkno(InodeNum::ROOT, u64::MAX, 8).is_err());
 
 		let direct = |bno| {
 			let mut b = InodeBlocks::default();

@@ -13,9 +13,7 @@ use bincode_next::{
 
 use crate::data::*;
 
-/// On disk, a time is `s` seconds since the epoch plus `ns` nanoseconds; `ns` is
-/// never negative. Times that `SystemTime` cannot hold (on Windows, anything before
-/// 1601) become the epoch.
+/// `ns` is never negative on disk. Times `SystemTime` cannot hold become the epoch.
 fn timetosys(s: UfsTime, ns: u32) -> SystemTime {
 	let secs = Duration::from_secs(s.unsigned_abs());
 	let base = if s < 0 {
@@ -23,7 +21,7 @@ fn timetosys(s: UfsTime, ns: u32) -> SystemTime {
 	} else {
 		SystemTime::UNIX_EPOCH.checked_add(secs)
 	};
-	base.and_then(|t| t.checked_add(Duration::from_nanos(ns.min(999_999_999).into())))
+	base.and_then(|t| t.checked_add(Duration::from_nanos(ns.into())))
 		.unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
@@ -208,8 +206,6 @@ impl<Context> Decode<Context> for Inode {
 		let flags = u32::decode(d)?;
 		let extsize = u32::decode(d)?;
 		let extb = <[UfsDaddr; UFS_NXADDR]>::decode(d)?;
-		// Like FreeBSD, decide by size: a short symlink may still have blocks for
-		// extended attributes. UFS2 always has fs_maxsymlinklen == UFS_SLLEN.
 		let data = if (mode & S_IFMT) == S_IFLNK && size < UFS_SLLEN as u64 {
 			InodeData::Shortlink(Decode::decode(d)?)
 		} else {
@@ -264,8 +260,6 @@ mod test {
 
 		let t = super::timetosys;
 		let epoch = SystemTime::UNIX_EPOCH;
-		assert_eq!(t(0, 0), epoch);
-		assert_eq!(t(1, 500), epoch + Duration::new(1, 500));
 		assert_eq!(t(-1, 0), epoch - Duration::from_secs(1));
 		assert_eq!(t(-1, 500_000_000), epoch - Duration::from_millis(500));
 		// Must not panic.

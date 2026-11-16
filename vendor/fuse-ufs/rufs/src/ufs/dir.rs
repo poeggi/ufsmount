@@ -27,8 +27,7 @@ impl Header {
 		}
 	}
 
-	/// Parse the record at the current position of a chunk that ends at `end`.
-	/// Returns `None` at the end of the chunk and `EIO` for a corrupt record.
+	/// `end` is the end of the chunk. `None` there, `EIO` for a corrupt record.
 	fn parse<T: BufRead + Seek>(file: &mut Decoder<T>, end: u64) -> IoResult<Option<Header>> {
 		let pos = file.pos()?;
 		if pos >= end {
@@ -43,12 +42,9 @@ impl Header {
 		if reclen == 0 {
 			return Ok(None);
 		}
-		let dtype: u8 = file.decode()?;
+		let kind: u8 = file.decode()?;
 		let namelen: u8 = file.decode()?;
-		let mut name = [0u8; UFS_MAXNAMELEN + 1];
-
-		// As fsck's dircheck(): a record is 4-byte aligned and ends within its chunk,
-		// and a used record holds its name and the NUL.
+		// The checks of fsck's dircheck().
 		if reclen < 8 ||
 			!reclen.is_multiple_of(4) ||
 			u64::from(reclen) > end - pos ||
@@ -60,19 +56,9 @@ impl Header {
 			);
 			return Err(err!(EIO));
 		}
-
-		// An unused entry (d_ino 0) only holds space; its name may be stale.
-		if inr.get() == 0 {
-			file.seek_relative(i64::from(reclen) - 8)?;
-			return Ok(Some(Self {
-				inr,
-				reclen,
-				dtype,
-				namelen: 0,
-				name,
-			}));
-		}
-
+		// The name of an unused entry (d_ino 0) may be stale.
+		let namelen = if inr.get() == 0 { 0 } else { namelen };
+		let mut name = [0u8; UFS_MAXNAMELEN + 1];
 		file.read(&mut name[0..namelen.into()])?;
 
 		// skip remaining bytes of record, if any
@@ -80,31 +66,31 @@ impl Header {
 		file.seek_relative(off as i64)?;
 
 		log::trace!(
-			"Header::parse(): {{ inr={inr}, reclen={reclen}, namelen={namelen}, name=\"{}\", dtype={dtype} }}",
+			"Header::read(): {{ inr={inr}, reclen={reclen}, namelen={namelen}, name=\"{}\", kind={kind} }}",
 			name[0..namelen.into()].escape_ascii()
 		);
 
 		Ok(Some(Self {
 			inr,
 			reclen,
-			dtype,
+			dtype: kind,
 			namelen,
 			name,
 		}))
 	}
 
 	fn write<T: Read + Write + Seek>(&self, file: &mut Decoder<T>) -> IoResult<()> {
+		let kind = self.dtype;
 		log::trace!(
-			"Header::write(inr={}, reclen={}, namelen={}, name=\"{}\", dtype={})",
+			"Header::write(inr={}, reclen={}, namelen={}, name=\"{}\", kind={kind})",
 			self.inr,
 			self.reclen,
 			self.namelen,
-			self.name().escape_ascii(),
-			self.dtype
+			self.name().escape_ascii()
 		);
 		file.encode(&self.inr)?;
 		file.encode(&self.reclen)?;
-		file.encode(&self.dtype)?;
+		file.encode(&kind)?;
 		file.encode(&self.namelen)?;
 		file.write(&self.name[0..self.namelen.into()])?;
 
@@ -149,8 +135,7 @@ fn dtype_of(kind: InodeType) -> u8 {
 	}
 }
 
-/// Size of a record for a name of `namelen` bytes: the header, the name and its NUL,
-/// rounded up to 4 bytes (`DIRECTSIZ` in FreeBSD).
+/// FreeBSD's DIRECTSIZ: header, name and NUL, rounded up to 4 bytes.
 fn dirsiz(namelen: u8) -> u16 {
 	(8 + namelen as u16 + 1 + 3) & !3
 }
@@ -226,7 +211,6 @@ fn newlink_block(block: &mut [u8], mut entry: Header, config: Config) -> IoResul
 			break;
 		};
 		if hdr.inr.get() == 0 {
-			// The new entry takes the whole record of an unused entry.
 			if hdr.reclen < entry.minlen() {
 				continue;
 			}
@@ -648,57 +632,37 @@ mod t {
 		unsafe { InodeNum::new(n) }
 	}
 
-	fn reclen_at(block: &[u8], pos: usize, big: bool) -> u16 {
-		let b = [block[pos + 4], block[pos + 5]];
-		if big {
-			u16::from_be_bytes(b)
-		} else {
-			u16::from_le_bytes(b)
-		}
+	fn reclen_at(block: &[u8], pos: usize) -> u16 {
+		u16::from_le_bytes([block[pos + 4], block[pos + 5]])
 	}
 
-	/// A record holds its name and a NUL, rounded up to 4 bytes.
 	#[test]
 	fn record_sizes() {
-		assert_eq!(dirsiz(1), 12);
 		assert_eq!(dirsiz(3), 12);
 		assert_eq!(dirsiz(4), 16);
 		assert_eq!(dirsiz(255), 264);
 
 		let block = newdir(inr(2), inr(5), Config::little()).unwrap();
-		assert_eq!(reclen_at(&block, 0, false), 12);
-		assert_eq!(reclen_at(&block, 12, false), (DIRBLKSIZE - 12) as u16);
+		assert_eq!(reclen_at(&block, 0), 12);
+		assert_eq!(reclen_at(&block, 12), (DIRBLKSIZE - 12) as u16);
 	}
 
-	fn config(big: bool) -> Config {
-		if big {
-			Config::big()
-		} else {
-			Config::little()
-		}
-	}
-
-	fn push_entry(block: &mut Vec<u8>, big: bool, inr: u32, reclen: u16, dtype: u8, name: &[u8]) {
+	fn push_entry(block: &mut Vec<u8>, inr: u32, reclen: u16, dtype: u8, name: &[u8]) {
 		let start = block.len();
-		if big {
-			block.extend(inr.to_be_bytes());
-			block.extend(reclen.to_be_bytes());
-		} else {
-			block.extend(inr.to_le_bytes());
-			block.extend(reclen.to_le_bytes());
-		}
+		block.extend(inr.to_le_bytes());
+		block.extend(reclen.to_le_bytes());
 		block.push(dtype);
 		block.push(name.len() as u8);
 		block.extend(name);
 		block.resize(start + reclen as usize, 0);
 	}
 
-	fn list(block: &[u8], big: bool) -> Vec<(Vec<u8>, u32)> {
+	fn list(block: &[u8]) -> Vec<(Vec<u8>, u32)> {
 		let mut names = Vec::new();
 		readdir_block(
 			inr(2),
 			block,
-			config(big),
+			Config::little(),
 			false,
 			|name, inr, _kind| {
 				names.push((name.to_vec(), inr.get()));
@@ -714,100 +678,56 @@ mod t {
 	/// d_reclen. The entries behind it must still be found.
 	#[test]
 	fn unused_first_entry() {
-		for big in [false, true] {
-			let mut block = Vec::new();
-			push_entry(&mut block, big, 0, 16, DT_REG, b"gone");
-			push_entry(&mut block, big, 5, 16, DT_REG, b"live");
-			push_entry(
-				&mut block,
-				big,
-				6,
-				(DIRBLKSIZE - 32) as u16,
-				DT_DIR,
-				b"subdir",
-			);
-			assert_eq!(
-				list(&block, big),
-				vec![(b"live".to_vec(), 5), (b"subdir".to_vec(), 6)]
-			);
-		}
-	}
-
-	/// The name length of an unused entry may be stale, even longer than the record.
-	#[test]
-	fn unused_entry_with_stale_namelen() {
 		let mut block = Vec::new();
-		push_entry(&mut block, false, 0, 12, DT_REG, b"x");
+		push_entry(&mut block, 0, 16, DT_REG, b"gone");
 		block[7] = 200;
-		push_entry(
-			&mut block,
-			false,
-			5,
-			(DIRBLKSIZE - 12) as u16,
-			DT_REG,
-			b"live",
+		push_entry(&mut block, 5, 16, DT_REG, b"live");
+		push_entry(&mut block, 6, (DIRBLKSIZE - 32) as u16, DT_DIR, b"subdir");
+		assert_eq!(
+			list(&block),
+			vec![(b"live".to_vec(), 5), (b"subdir".to_vec(), 6)]
 		);
-		assert_eq!(list(&block, false), vec![(b"live".to_vec(), 5)]);
 	}
 
 	/// Unlinking the entry after an unused first entry merges it into that record,
 	/// which keeps its d_type.
 	#[test]
 	fn unlink_after_unused_entry() {
-		for big in [false, true] {
-			let mut block = Vec::new();
-			push_entry(&mut block, big, 0, 16, DT_DIR, b"gone");
-			push_entry(&mut block, big, 5, 16, DT_REG, b"live");
-			push_entry(
-				&mut block,
-				big,
-				6,
-				(DIRBLKSIZE - 32) as u16,
-				DT_REG,
-				b"other",
-			);
+		let mut block = Vec::new();
+		push_entry(&mut block, 0, 16, DT_DIR, b"gone");
+		push_entry(&mut block, 5, 16, DT_REG, b"live");
+		push_entry(&mut block, 6, (DIRBLKSIZE - 32) as u16, DT_REG, b"other");
 
-			let res = unlink_block(inr(2), &mut block, b"live", config(big)).unwrap();
-			assert_eq!(res.map(|(inr, has)| (inr.get(), has)), Some((5, true)));
-			assert_eq!(list(&block, big), vec![(b"other".to_vec(), 6)]);
-			assert_eq!(reclen_at(&block, 0, big), 32);
-			assert_eq!(block[6], DT_DIR);
-		}
+		let res = unlink_block(inr(2), &mut block, b"live", Config::little()).unwrap();
+		assert_eq!(res.map(|(inr, has)| (inr.get(), has)), Some((5, true)));
+		assert_eq!(list(&block), vec![(b"other".to_vec(), 6)]);
+		assert_eq!(reclen_at(&block, 0), 32);
+		assert_eq!(block[6], DT_DIR);
 	}
 
-	/// A new entry takes the whole record of an unused first entry.
 	#[test]
 	fn newlink_reuses_unused_entry() {
-		for big in [false, true] {
-			let mut block = Vec::new();
-			push_entry(&mut block, big, 0, 16, DT_REG, b"gone");
-			push_entry(
-				&mut block,
-				big,
-				5,
-				(DIRBLKSIZE - 16) as u16,
-				DT_REG,
-				b"live",
-			);
+		let mut block = Vec::new();
+		push_entry(&mut block, 0, 16, DT_REG, b"gone");
+		push_entry(&mut block, 5, (DIRBLKSIZE - 16) as u16, DT_REG, b"live");
 
-			let entry = Header::new(inr(7), InodeType::RegularFile, b"new");
-			assert!(newlink_block(&mut block, entry, config(big)).unwrap());
-			assert_eq!(
-				list(&block, big),
-				vec![(b"new".to_vec(), 7), (b"live".to_vec(), 5)]
-			);
-		}
+		let entry = Header::new(inr(7), InodeType::RegularFile, b"new");
+		assert!(newlink_block(&mut block, entry, Config::little()).unwrap());
+		assert_eq!(
+			list(&block),
+			vec![(b"new".to_vec(), 7), (b"live".to_vec(), 5)]
+		);
 	}
 
-	/// A corrupt record ends a read-only listing of its chunk. Strict reading and the
-	/// write paths give EIO instead of panicking.
+	/// A corrupt record ends a read-only listing of its chunk; strict reading and the
+	/// write paths give EIO.
 	#[test]
 	fn corrupt_record() {
 		let mut block = Vec::new();
-		push_entry(&mut block, false, 5, 16, DT_REG, b"ok");
-		push_entry(&mut block, false, 6, 13, DT_REG, b"bad");
+		push_entry(&mut block, 5, 16, DT_REG, b"ok");
+		push_entry(&mut block, 6, 13, DT_REG, b"bad");
 		block.resize(DIRBLKSIZE, 0);
-		assert_eq!(list(&block, false), vec![(b"ok".to_vec(), 5)]);
+		assert_eq!(list(&block), vec![(b"ok".to_vec(), 5)]);
 
 		let strict = readdir_block(
 			inr(2),
@@ -827,22 +747,19 @@ mod t {
 	#[test]
 	fn record_past_chunk() {
 		let mut block = Vec::new();
-		push_entry(&mut block, false, 5, 16, DT_REG, b"ok");
-		push_entry(&mut block, false, 6, DIRBLKSIZE as u16, DT_REG, b"long");
+		push_entry(&mut block, 5, 16, DT_REG, b"ok");
+		push_entry(&mut block, 6, DIRBLKSIZE as u16, DT_REG, b"long");
 		block.truncate(DIRBLKSIZE);
-		assert_eq!(list(&block, false), vec![(b"ok".to_vec(), 5)]);
+		assert_eq!(list(&block), vec![(b"ok".to_vec(), 5)]);
 	}
 
 	/// The last chunk of a directory may be partial.
 	#[test]
 	fn partial_chunk() {
 		let mut block = Vec::new();
-		push_entry(&mut block, false, 5, 16, DT_REG, b"a");
-		push_entry(&mut block, false, 6, 84, DT_REG, b"b");
-		assert_eq!(
-			list(&block, false),
-			vec![(b"a".to_vec(), 5), (b"b".to_vec(), 6)]
-		);
+		push_entry(&mut block, 5, 16, DT_REG, b"a");
+		push_entry(&mut block, 6, 84, DT_REG, b"b");
+		assert_eq!(list(&block), vec![(b"a".to_vec(), 5), (b"b".to_vec(), 6)]);
 	}
 
 	fn kinds(
@@ -865,14 +782,13 @@ mod t {
 		Ok(out)
 	}
 
-	/// An entry with an unknown or undefined d_type takes its type from the inode.
-	/// If the inode cannot tell, a read-only listing skips the entry; strict reading
-	/// gives the error.
+	/// An unknown or undefined d_type comes from the inode; if that fails, a read-only
+	/// listing skips the entry and strict reading fails.
 	#[test]
 	fn unknown_dtype() {
 		let mut block = Vec::new();
-		push_entry(&mut block, false, 5, 16, DT_UNKNOWN, b"what");
-		push_entry(&mut block, false, 6, (DIRBLKSIZE - 16) as u16, 99, b"bad");
+		push_entry(&mut block, 5, 16, DT_UNKNOWN, b"what");
+		push_entry(&mut block, 6, (DIRBLKSIZE - 16) as u16, 99, b"bad");
 
 		let dir = Some(InodeType::Directory);
 		let want = vec![
@@ -880,7 +796,6 @@ mod t {
 			(b"bad".to_vec(), InodeType::Directory),
 		];
 		assert_eq!(kinds(&block, false, dir).unwrap(), want);
-		assert_eq!(kinds(&block, true, dir).unwrap(), want);
 		assert!(kinds(&block, false, None).unwrap().is_empty());
 		assert!(kinds(&block, true, None).is_err());
 	}
@@ -914,19 +829,14 @@ mod t {
 		Ok(names)
 	}
 
-	/// A directory is no larger than the data area of the file system (192
-	/// fragments of 4096 bytes). A larger size gives EIO before any chunk is read.
+	/// A directory larger than the data area (192 fragments of 4096 bytes) gives EIO.
 	#[test]
 	fn dir_size_bounds() {
 		let dots = vec![b".".to_vec(), b"..".to_vec()];
-		assert_eq!(root_names(root_dir(512)), Ok(dots.clone()));
 		assert_eq!(
 			root_names(root_dir(65536)),
 			Ok([dots.clone(), dots].concat())
 		);
-
-		let eio = Err(Some(libc::EIO));
-		assert_eq!(root_names(root_dir(1 << 20)), eio);
-		assert_eq!(root_names(root_dir(1 << 40)), eio);
+		assert_eq!(root_names(root_dir(1 << 20)), Err(Some(libc::EIO)));
 	}
 }

@@ -102,8 +102,7 @@ pub const FSMAXSNAP: usize = 20;
 /// temporarily NULL'ed out so that the kernel pointer will not appear
 /// in the on-disk copy of the superblock.
 ///
-/// The region is 128 bytes on every architecture. It is read as 64-bit
-/// words here, so that the layout does not depend on the target.
+/// On disk the region is 128 bytes on every target, so it is read as u64 words.
 pub const NOCSPTRS: usize = (128 / size_of::<u64>()) - 1;
 
 /// External addresses in inode.

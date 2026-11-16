@@ -388,8 +388,7 @@ mod t {
 		}
 	}
 
-	/// After a failed refill nothing is buffered: the next read goes to the
-	/// backend instead of returning zeros or the previous block.
+	/// After a failed refill the next read goes to the backend again.
 	#[test]
 	fn failed_refill() {
 		// Block n holds the byte n + 1.

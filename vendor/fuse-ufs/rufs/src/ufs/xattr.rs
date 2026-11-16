@@ -15,9 +15,12 @@ impl<R: Backend> Ufs<R> {
 		let fs = self.superblock.fsize as u64;
 		let bs = self.superblock.bsize as usize;
 		let sz = ino.extsize as usize;
+		let bad = |what: &str| {
+			log::error!("inode {inr}: invalid extattr {what}");
+			err!(EIO)
+		};
 		if sz > UFS_NXADDR * bs {
-			log::error!("inode {inr}: invalid extattr area size: {sz}");
-			return Err(err!(EIO));
+			return Err(bad("area size"));
 		}
 
 		let mut blocks = vec![0u8; ino.extsize as usize];
@@ -27,8 +30,7 @@ impl<R: Backend> Ufs<R> {
 		while nr < blocks.len() {
 			let bno = ino.extb[blkidx] as u64;
 			if bno == 0 {
-				log::error!("inode {inr}: extattr block {blkidx} is missing");
-				return Err(err!(EIO));
+				return Err(bad("block"));
 			}
 			let num = bs.min(blocks.len() - nr);
 			let pos = self.check_blkno(inr, bno, (num as u64).div_ceil(fs))? * fs;
@@ -52,34 +54,21 @@ impl<R: Backend> Ufs<R> {
 			if namelen == 0 {
 				break;
 			} else if namelen > UFS_EXTATTR_MAXNAMELEN {
-				log::error!("inode {inr}: invalid extattr name length: {namelen}");
-				return Err(err!(EIO));
+				return Err(bad("name length"));
 			}
 
-			if file.read(&mut name[0..namelen]).is_err() {
-				log::error!("inode {inr}: truncated extattr name");
-				return Err(err!(EIO));
-			}
+			file.read(&mut name[0..namelen]).map_err(|_| bad("name"))?;
 			file.align_to(8)?;
-			let Some(len) = (hdr.len as u64)
+			let len = (hdr.len as u64)
 				.checked_sub(file.pos()? - begin)
 				.filter(|&len| len <= sz as u64)
-			else {
-				log::error!("inode {inr}: invalid extattr length: {}", hdr.len);
-				return Err(err!(EIO));
-			};
+				.ok_or_else(|| bad("length"))?;
 			data.resize(len as usize, 0u8);
-			if file.read(&mut data).is_err() {
-				log::error!("inode {inr}: truncated extattr value");
-				return Err(err!(EIO));
-			}
-			let Some(keep) = data.len().checked_sub(hdr.contentpadlen as usize) else {
-				log::error!(
-					"inode {inr}: invalid extattr padding: {}",
-					hdr.contentpadlen
-				);
-				return Err(err!(EIO));
-			};
+			file.read(&mut data).map_err(|_| bad("value"))?;
+			let keep = data
+				.len()
+				.checked_sub(hdr.contentpadlen as usize)
+				.ok_or_else(|| bad("padding"))?;
 			data.truncate(keep);
 
 			if let Some(x) = f(&hdr, &name[0..namelen], &data) {

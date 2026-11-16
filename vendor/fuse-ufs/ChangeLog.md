@@ -15,7 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - rufs: build on non-Unix targets, such as Windows
 - rufs: `dir_iter_bytes()` and `dir_lookup_bytes()`, which pass names as raw on-disk bytes
-- rufs: `Info` has the file system size in fragments, clean flag, status flags, id, volume name and last mount point
+- rufs: `Info` gains `frags`, `clean`, `flags`, `id`, `label` and `fsmnt`
 - rufs: open NetBSD's UFS2 with extended attributes (FFSv2ea magic 0x19012038)
 
 ### Fix
@@ -23,24 +23,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - rufs: backend I/O errors keep their kind and cause instead of becoming "failed to decode"
 - rufs: a read-only open no longer reads every cylinder group
 - rufs: `inode_read()` past the end of a file returns 0 instead of panicking
-- rufs: timestamps that `SystemTime` cannot hold no longer panic; times before the epoch with nanoseconds are read and written correctly
-- rufs: short symlinks with extattr blocks, and long symlinks that end in a fragment
-- rufs: reject superblocks with impossible sizes or offsets; open file systems whose `sbsize` is not `fsize` (512 and 1024-byte fragments)
+- rufs: out-of-range timestamps no longer panic; times before the epoch with nanoseconds are read correctly
+- rufs: times before the epoch with nanoseconds are written correctly
+- rufs: read short symlinks that have extattr blocks
+- rufs: read long symlinks that end in a fragment of any size
+- rufs: reject superblocks with impossible sizes or offsets
+- rufs: `info()` does not overflow on large file systems or corrupt counts
+- rufs: read errors while checking cylinder groups are returned instead of panicking
+- rufs: open file systems whose `sbsize` is not `fsize`
 - rufs: inode numbers past the last cylinder group and unknown file types give `EIO`
-- rufs: reading a device node, fifo or socket returns no data instead of panicking; block indexes past the file give `EIO`
+- rufs: reading a device node, fifo or socket returns no data instead of panicking
+- rufs: a block index past the file gives `EIO` instead of panicking
 - rufs: block pointers past the end of the file system give `EIO` on the read path
 - rufs: corrupt extattr areas give `EIO` instead of panicking
 - rufs: directory records leave room for the NUL after the name, as FreeBSD requires
-- rufs: directory entries behind an unused (deleted) first entry of a chunk are listed and found
-- rufs: corrupt directory records and directories with holes give `EIO` instead of panicking or looping; a read-only listing skips the rest of a corrupt chunk
+- rufs: entries behind an unused directory entry are listed and found
+- rufs: corrupt directory records and holes in directories give `EIO` instead of panicking or looping
 - rufs: entries with `DT_UNKNOWN` or an undefined d_type take their type from the inode instead of panicking
 - rufs: a superblock with a negative `fs_fpg` gives `EIO` instead of panicking in the summary log
 - rufs: reject superblocks whose inode blocks do not fit in a cylinder group, as FreeBSD does
-- rufs: the superblock layout no longer depends on the pointer size, so 32-bit targets read it correctly
+- rufs: the superblock is read correctly on 32-bit targets
 - rufs: after a failed read, `BlockReader` no longer returns zeros or stale data on the next read
-- rufs: reading the end of a file whose size is close to 2^64 gives an error instead of an overflow panic
-- rufs: data, pointer and extattr blocks that run past the end of the file system give `EIO`, not just those that start past it
-- rufs: a directory larger than the file system gives `EIO` instead of being read for that size
+- rufs: no overflow panic for a file size close to 2^64
+- rufs: blocks that run past the end of the file system give `EIO`
+- rufs: a directory larger than the file system gives `EIO`
 
 ## [0.6.0] - 2025-09-27
 

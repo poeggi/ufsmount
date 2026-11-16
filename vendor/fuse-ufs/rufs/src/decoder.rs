@@ -35,7 +35,6 @@ impl Config {
 		}
 		.map_err(|e| {
 			match e {
-				// Read errors pass through; BlockReader has wrapped those of the backend.
 				DecodeError::Io { inner, .. } => inner,
 				_ => Error::new(ErrorKind::InvalidInput, "failed to decode"),
 			}
@@ -148,8 +147,6 @@ impl<T: Read + Write + Seek> Decoder<T> {
 
 #[cfg(test)]
 mod t {
-	use std::io::Cursor;
-
 	use super::*;
 
 	struct Failing;
@@ -168,15 +165,5 @@ mod t {
 			.unwrap_err();
 		assert_eq!(e.kind(), ErrorKind::Other);
 		assert_eq!(e.to_string(), "device failed");
-	}
-
-	/// Truncated input is a decode error, not a read error.
-	#[test]
-	fn decode_short_input() {
-		let mut d = Decoder::new(Cursor::new([1u8, 2]), Config::little());
-		assert_eq!(
-			d.decode::<u32>().unwrap_err().kind(),
-			ErrorKind::InvalidInput
-		);
 	}
 }

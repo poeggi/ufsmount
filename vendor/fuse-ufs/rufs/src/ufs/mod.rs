@@ -73,7 +73,7 @@ pub struct Info {
 	pub id: [u32; 2],
 
 	/// Volume name (`fs_volname`), without the trailing NULs.
-	pub volname: Vec<u8>,
+	pub label: Vec<u8>,
 
 	/// Where the file system was last mounted (`fs_fsmnt`), without the trailing NULs.
 	pub fsmnt: Vec<u8>,
@@ -145,22 +145,22 @@ impl<R: Backend> Ufs<R> {
 		let sb = &self.superblock;
 		let cst = &sb.cstotal;
 		Info {
-			blocks:  sb.dsize as u64,
-			bfree:   cst
+			blocks: sb.dsize as u64,
+			bfree:  cst
 				.nbfree
 				.saturating_mul(sb.frag as i64)
 				.saturating_add(cst.nffree)
 				.max(0) as u64,
-			files:   sb.ipg as u64 * sb.ncg as u64,
-			ffree:   cst.nifree.max(0) as u64,
-			bsize:   sb.bsize as u32,
-			fsize:   sb.fsize as u32,
-			frags:   sb.size as u64,
-			clean:   sb.clean == 1,
-			flags:   sb.flags as u32,
-			id:      [sb.id[0] as u32, sb.id[1] as u32],
-			volname: until_nul(&sb.volname),
-			fsmnt:   until_nul(&sb.fsmnt),
+			files:  sb.ipg as u64 * sb.ncg as u64,
+			ffree:  cst.nifree.max(0) as u64,
+			bsize:  sb.bsize as u32,
+			fsize:  sb.fsize as u32,
+			frags:  sb.size as u64,
+			clean:  sb.clean == 1,
+			flags:  sb.flags as u32,
+			id:     [sb.id[0] as u32, sb.id[1] as u32],
+			label:  until_nul(&sb.volname),
+			fsmnt:  until_nul(&sb.fsmnt),
 		}
 	}
 
@@ -181,13 +181,12 @@ impl<R: Backend> Ufs<R> {
 		sbassert!(sb.ipg > 0);
 		sbassert!(sb.fpg > 0);
 		sbassert!(sb.frag > 0 && sb.frag <= 8);
-		// MINBSIZE, MAXBSIZE and DEV_BSIZE: everything below relies on sane sizes.
+		// MINBSIZE, MAXBSIZE, DEV_BSIZE
 		sbassert!(sb.bsize >= 4096 && sb.bsize <= 65536);
 		sbassert!(sb.fsize >= 512);
 		sbassert!(sb.fsize == (sb.bsize / sb.frag));
 		sbassert!(sb.size > 0 && sb.dsize > 0 && sb.dsize <= sb.size);
-		// The last cylinder group may be partial, but not empty. Together with the
-		// byte size check, this keeps fragment and inode offsets from overflowing.
+		// The last cylinder group may be partial, but not empty.
 		sbassert!(sb.size > (sb.ncg as i64 - 1) * sb.fpg as i64);
 		sbassert!(sb.size <= sb.ncg as i64 * sb.fpg as i64);
 		sbassert!(sb.size.checked_mul(sb.fsize as i64).is_some());
@@ -206,8 +205,7 @@ impl<R: Backend> Ufs<R> {
 		let inode_frags = (sb.ipg / (sb.inopb >> sb.fragshift)) as i64;
 		sbassert!(sb.iblkno as i64 + inode_frags <= sb.fpg as i64);
 		sbassert!(sb.dblkno as i64 == sb.iblkno as i64 + inode_frags);
-		// sizeof(struct fs) to SBLOCKSIZE, as FreeBSD checks. newfs rounds it up to
-		// a fragment, so it is 1536 for 512-byte fragments, not fsize.
+		// sizeof(struct fs)..=SBLOCKSIZE; newfs rounds sbsize up to a fragment.
 		sbassert!(sb.sbsize >= 1376 && sb.sbsize <= 8192);
 		sbassert!(sb.cgsize_struct() < sb.bsize as usize);
 
@@ -220,34 +218,34 @@ impl<R: Backend> Ufs<R> {
 		log::info!("# Cylinder Groups: {}", sb.ncg);
 		log::info!("CG Size: {}MiB", sb.cgsize() / 1024 / 1024);
 
-		// Reading every cylinder group is slow on large disks, and one bad sector
-		// would refuse the whole file system. Only the allocator uses them.
-		if self.write_enabled() {
-			let fpg = sb.fpg as u64;
-			let sblkno = sb.sblkno as u64;
-			let fs = sb.fsize as u64;
+		// Only the allocator uses the cylinder groups.
+		if !self.write_enabled() {
+			log::info!("OK (cylinder groups not checked)");
+			return Ok(());
+		}
 
-			// check that all superblocks are ok.
-			for i in 0..sb.ncg {
-				let addr = (i as u64 * fpg + sblkno) * fs;
-				let csb: Superblock = self.file.decode_at(addr)?;
-				if csb.magic != sb.magic {
-					log::error!("CG{i} has invalid superblock magic: {:x}", csb.magic);
-					return Err(err!(EIO));
-				}
-			}
+		let fpg = sb.fpg as u64;
+		let sblkno = sb.sblkno as u64;
+		let fs = sb.fsize as u64;
 
-			// check that all cylgroups are ok.
-			for i in 0..self.superblock.ncg {
-				let addr = self.cg_addr(i as u64);
-				let cg: CylGroup = self.file.decode_at(addr)?;
-				if cg.magic != CG_MAGIC {
-					log::error!("CG{i} has invalid cg magic: {:x}", cg.magic);
-					return Err(err!(EIO));
-				}
+		// check that all superblocks are ok.
+		for i in 0..sb.ncg {
+			let addr = (i as u64 * fpg + sblkno) * fs;
+			let csb: Superblock = self.file.decode_at(addr)?;
+			if csb.magic != sb.magic {
+				log::error!("CG{i} has invalid superblock magic: {:x}", csb.magic);
+				return Err(err!(EIO));
 			}
-		} else {
-			log::info!("cylinder groups not checked (read-only)");
+		}
+
+		// check that all cylgroups are ok.
+		for i in 0..self.superblock.ncg {
+			let addr = self.cg_addr(i as u64);
+			let cg: CylGroup = self.file.decode_at(addr)?;
+			if cg.magic != CG_MAGIC {
+				log::error!("CG{i} has invalid cg magic: {:x}", cg.magic);
+				return Err(err!(EIO));
+			}
 		}
 		log::info!("OK");
 		Ok(())
@@ -283,7 +281,6 @@ fn check_name_is_legal(name: &[u8], allow_special: bool) -> IoResult<()> {
 	}
 }
 
-/// The bytes of `b` up to the first NUL.
 fn until_nul(b: &[u8]) -> Vec<u8> {
 	b.iter()
 		.position(|&c| c == 0)
@@ -296,7 +293,7 @@ fn until_nul(b: &[u8]) -> Vec<u8> {
 mod testfs {
 	use super::*;
 
-	/// The size of the image: the whole file system of [`superblock()`].
+	/// The whole file system of [`superblock()`].
 	const IMGSIZE: usize = 256 * 4096;
 
 	/// A valid superblock: one cylinder group of 256 fragments of 4096 bytes,
@@ -395,7 +392,6 @@ mod t {
 		assert_eq!(ufs.info().frags, 256);
 	}
 
-	/// Nothing is computed from a superblock before it is checked.
 	#[test]
 	fn negative_fpg() {
 		let mut sb = superblock();

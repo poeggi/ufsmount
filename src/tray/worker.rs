@@ -171,7 +171,7 @@ fn watch_removal(window: usize, dev: &Device) -> usize {
         dbch_handle: HANDLE(handle as *mut c_void),
         ..Default::default()
     };
-    // SAFETY: the filter lives through the call; Active::stop ends the registration.
+    // SAFETY: the filter lives through the call; dropping the Active ends the registration.
     match unsafe {
         RegisterDeviceNotificationW(
             HANDLE(window as *mut c_void),
@@ -751,7 +751,16 @@ impl Worker {
                     if !self.actives.iter().any(|a| a.key == key)
                         && let Some(old) = old
                     {
+                        // Back on the old letter; the letter chosen before stays.
+                        let chosen = self.letters.get(&key.2).copied();
                         self.remount(key, disk, Some(dev), Some(old));
+                        if self.letters.get(&key.2).copied() != chosen {
+                            match chosen {
+                                Some(c) => self.letters.insert(key.2, c),
+                                None => self.letters.remove(&key.2),
+                            };
+                            settings::save_letters(&self.letters);
+                        }
                     }
                 }
             }

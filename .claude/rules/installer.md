@@ -9,7 +9,9 @@
 - An unticked PATH or launcher task on an upgrade removes that PATH entry or registration.
 - On an upgrade the launcher task is preselected when registered, and the logon task as
   `<ProgramData>\ufsmount\start-at-sign-in` says ("1" or "0", written with each task).
-  The tray's "Start at sign-in" changes it. `/TASKS=` or `/MERGETASKS=` win over both.
+  The tray's "Start at sign-in" changes it. A silent install applies both from the installed
+  state when it creates the task (`TaskWanted`), not through the wizard page.
+  `/TASKS=` or `/MERGETASKS=` win over both.
 - An older version over a newer one asks first. Silent installs need `/ALLOWDOWNGRADE` for it.
 - PATH is edited by `ufsmount-tray --add-to-path` and `--remove-from-path`, which keep the registry type.
   Pascal script cannot read that type.

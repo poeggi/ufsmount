@@ -272,24 +272,59 @@ begin
   WizardForm.RunList.Offset := Offset;
 end;
 
+{ True when the installed state decides the launcher and logon tasks: the
+  command line sets no tasks. }
+function KeepInstalledTasks: Boolean;
+begin
+  Result := not HasParamPrefix('/TASKS=') and not HasParamPrefix('/MERGETASKS=');
+end;
+
+{ The tray's "Start at sign-in" of the installed version: '1', '0' or ''.
+  Only an installed version has made its folder admin-only. }
+function InstalledSignIn: String;
+var
+  S: AnsiString;
+begin
+  Result := '';
+  if RegKeyExists(HKLM64, '{#UninstallKey}') then
+    if LoadStringFromFile(ExpandConstant('{commonappdata}\ufsmount\start-at-sign-in'), S) then
+      if (S = '1') or (S = '0') then
+        Result := S;
+end;
+
+{ A task as chosen. A silent install without tasks on the command line
+  keeps the installed launcher registration and "Start at sign-in". }
+function TaskWanted(Task: String): Boolean;
+var
+  SignIn: String;
+begin
+  Result := WizardIsTaskSelected(Task);
+  if not WizardSilent or not KeepInstalledTasks then
+    exit;
+  if Task = 'launcher' then
+    Result := Result or RegKeyExists(HKLM32, '{#LauncherKey}')
+  else if Task = 'logon' then begin
+    SignIn := InstalledSignIn;
+    if SignIn <> '' then
+      Result := SignIn = '1';
+  end;
+end;
+
 procedure CurPageChanged(CurPageID: Integer);
 var
-  SignIn: AnsiString;
+  SignIn: String;
 begin
-  { Keep an existing launcher registration, and the tray's "Start at sign-in",
-    unless the command line sets the tasks. This runs in silent installs too. }
+  { Show the installed launcher registration and "Start at sign-in". }
   if (CurPageID = wpSelectTasks) and not TasksChecked then begin
     TasksChecked := True;
-    if not HasParamPrefix('/TASKS=') and not HasParamPrefix('/MERGETASKS=') then begin
+    if KeepInstalledTasks then begin
       if RegKeyExists(HKLM32, '{#LauncherKey}') then
         WizardSelectTasks('launcher');
-      { Only an installed version has made the folder admin-only. }
-      if RegKeyExists(HKLM64, '{#UninstallKey}') and
-        LoadStringFromFile(ExpandConstant('{commonappdata}\ufsmount\start-at-sign-in'), SignIn) then
-        if SignIn = '1' then
-          WizardSelectTasks('logon')
-        else if SignIn = '0' then
-          WizardSelectTasks('!logon');
+      SignIn := InstalledSignIn;
+      if SignIn = '1' then
+        WizardSelectTasks('logon')
+      else if SignIn = '0' then
+        WizardSelectTasks('!logon');
     end;
   end;
 end;
@@ -326,10 +361,10 @@ begin
   if CurStep <> ssPostInstall then
     exit;
   Params := '--install-task';
-  if WizardIsTaskSelected('logon') then
+  if TaskWanted('logon') then
     Params := Params + ' --logon';
   RunOrWarn(ExpandConstant('{app}\ufsmount-tray.exe'), Params, 'creating the start task');
-  if WizardIsTaskSelected('launcher') then
+  if TaskWanted('launcher') then
     RunOrWarn(ExpandConstant('{app}\ufsmount.exe'), 'register', 'registering with the WinFsp launcher')
   else if RegKeyExists(HKLM32, '{#LauncherKey}') then
     RunHidden(ExpandConstant('{app}\ufsmount.exe'), 'unregister', Code);

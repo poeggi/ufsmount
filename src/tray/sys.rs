@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Win32 helpers for the tray. The elevated tray takes no paths from
 //! environment variables and starts nothing through ShellExecute: both can be
-//! steered by any process of the same user.
+//! steered by any process of the same user. Only the unelevated starter uses
+//! ShellExecute, to ask for elevation.
 
 use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, WAIT_TIMEOUT};
 use windows::Win32::Security::{
     DuplicateTokenEx, SecurityImpersonation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID,
     TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TokenElevationTypeFull, TokenPrimary,
@@ -21,10 +22,10 @@ use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWi
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_PROCESS_LOGON_FLAGS, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
     CreateProcessWithTokenW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     OpenProcess, OpenProcessToken, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, PROCESS_CREATE_PROCESS,
     PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOEXW,
-    STARTUPINFOW, UpdateProcThreadAttribute, WaitForSingleObject,
+    STARTUPINFOW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -144,6 +145,9 @@ fn arg(s: &str) -> String {
     out
 }
 
+/// Longest wait for a program `run_hidden` starts; it is ended after that.
+const RUN_WAIT_MS: u32 = 60_000;
+
 /// Run `exe` (a full path) with `args` and no window, wait, return its exit code.
 /// It starts in the system folder.
 pub fn run_hidden(exe: &Path, args: &str) -> anyhow::Result<u32> {
@@ -174,11 +178,15 @@ pub fn run_hidden(exe: &Path, args: &str) -> anyhow::Result<u32> {
             &mut pi,
         )
         .map_err(|e| anyhow::anyhow!("cannot run {}: {e}", exe.display()))?;
-        WaitForSingleObject(pi.hProcess, INFINITE);
+        let ended = WaitForSingleObject(pi.hProcess, RUN_WAIT_MS) != WAIT_TIMEOUT;
+        if !ended {
+            let _ = TerminateProcess(pi.hProcess, 1);
+        }
         let mut code = 1u32;
         let r = GetExitCodeProcess(pi.hProcess, &mut code);
         let _ = CloseHandle(pi.hThread);
         let _ = CloseHandle(pi.hProcess);
+        anyhow::ensure!(ended, "{} did not end within 60 s", exe.display());
         r.map_err(|e| anyhow::anyhow!("no exit code from {}: {e}", exe.display()))?;
         Ok(code)
     }

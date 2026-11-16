@@ -51,7 +51,7 @@ const RETRIES: u8 = 3;
 const MAX_NOTES: usize = 16;
 
 pub enum Cmd {
-    /// Probe disks that are not mounted. `manual` also forgets user unmounts.
+    /// Probe the disks. `manual` probes all and also forgets user unmounts.
     Rescan { manual: bool },
     /// A disk arrived; rescan after a short delay.
     Arrived,
@@ -142,8 +142,9 @@ struct Active {
     removal: usize,
 }
 
-impl Active {
-    fn stop(mut self) {
+/// Dropping an Active unmounts it and closes its disk, also after a panic.
+impl Drop for Active {
+    fn drop(&mut self) {
         if self.removal != 0 {
             // SAFETY: our registration, ended once.
             let _ =
@@ -460,7 +461,9 @@ impl Worker {
             self.add_idle(key, disk, label);
             return;
         }
-        if self.actives.len() >= MAX_MOUNTS {
+        if self.actives.len() < MAX_MOUNTS {
+            self.cap_warned = false;
+        } else {
             self.add_idle(key, disk, label.clone());
             if want.is_some() || !std::mem::replace(&mut self.cap_warned, true) {
                 let text = format!("{label} is not mounted (limit {MAX_MOUNTS})");
@@ -560,8 +563,16 @@ impl Worker {
     }
 
     fn scan_disk(&mut self, n: u32) {
-        // The probe lists this disk's file systems again.
-        self.idle.retain(|i| i.disk != Some(n));
+        let mut seen = Vec::new();
+        self.probe_disk(n, &mut seen);
+        // Listed file systems the probe did not find again are gone; the
+        // others keep their ids, which an open menu still uses.
+        self.idle
+            .retain(|i| i.disk != Some(n) || seen.contains(&i.key));
+    }
+
+    /// Mount or list the UFS2 file systems of disk `n`; `seen` gets their keys.
+    fn probe_disk(&mut self, n: u32, seen: &mut Vec<Key>) {
         let dev = match Device::open(&Source::PhysicalDrive(n), None) {
             Ok(d) => Arc::new(d),
             Err(e) => {
@@ -588,6 +599,9 @@ impl Worker {
             return;
         }
         for c in &ufs {
+            if let Some(f) = c.ufs2() {
+                seen.push((n, c.start, f.info.id));
+            }
             if catch_unwind(AssertUnwindSafe(|| self.mount(Some(n), &dev, c, None))).is_err() {
                 self.note("Mount failed", format!("PhysicalDrive{n} {}", c.id), true);
             }
@@ -661,10 +675,9 @@ impl Worker {
     fn gone(&mut self, id: u64) {
         if let Some(a) = self.take(id) {
             let text = format!("{}  {}", a.letter, a.label);
-            if let Some(n) = a.disk {
-                self.no_ufs.remove(&n);
-            }
-            a.stop();
+            // A pulled card sends no disk removal: its other file systems go too.
+            self.idle.retain(|i| a.disk.is_none() || i.disk != a.disk);
+            drop(a);
             self.note("Disk removed", text, true);
         }
     }
@@ -711,7 +724,7 @@ impl Worker {
                 if let Some(a) = self.take(id) {
                     self.unmounted.insert(a.key);
                     self.add_idle(a.key, a.disk, a.label.clone());
-                    a.stop();
+                    drop(a);
                 }
             }
             Cmd::Mount(id, letter) => {
@@ -732,8 +745,14 @@ impl Worker {
                     && let Some(a) = self.take(id)
                 {
                     let (key, disk, dev) = (a.key, a.disk, a.dev.clone());
-                    a.stop();
-                    self.remount(key, disk, Some(dev), Some(letter));
+                    let old = a.letter.chars().next();
+                    drop(a);
+                    self.remount(key, disk, Some(dev.clone()), Some(letter));
+                    if !self.actives.iter().any(|a| a.key == key)
+                        && let Some(old) = old
+                    {
+                        self.remount(key, disk, Some(dev), Some(old));
+                    }
                 }
             }
             Cmd::AutoMount(on) => {
@@ -754,7 +773,9 @@ impl Worker {
             Cmd::Gone(id) => self.gone(id),
             Cmd::Eject(handle, done) => {
                 // A pending scan would open the disk again before Windows removes it.
-                *rescan_at = None;
+                if rescan_at.is_some() {
+                    *rescan_at = Some(Instant::now() + DEBOUNCE);
+                }
                 let (eject, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.actives)
                     .into_iter()
                     .partition(|a| a.dev.disk_handle() == Some(handle));
@@ -764,7 +785,7 @@ impl Worker {
                 self.idle.retain(|i| !disks.contains(&i.disk));
                 for a in eject {
                     log::info!("{}: removal requested", a.dev.name());
-                    a.stop();
+                    drop(a);
                 }
                 let _ = done.send(());
             }
@@ -781,6 +802,8 @@ impl Worker {
         self.sign_in = task::starts_at_sign_in();
         self.auto_mount = settings::auto_mount();
         self.letters = settings::letters();
+        self.status = "looking for UFS disks".to_string();
+        self.publish();
         self.guard(|w| w.scan(false));
         if self.actives.is_empty() && self.idle.is_empty() && self.notes.is_empty() {
             self.note(
@@ -817,7 +840,7 @@ impl Worker {
             self.guard(|w| quit = w.handle(cmd, &mut rescan_at));
             if let Some(done) = quit {
                 for a in std::mem::take(&mut self.actives) {
-                    let _ = catch_unwind(AssertUnwindSafe(|| a.stop()));
+                    let _ = catch_unwind(AssertUnwindSafe(|| drop(a)));
                 }
                 let _ = done.send(());
                 return;
@@ -972,10 +995,18 @@ mod tests {
     fn eject_answers_without_a_mount() {
         let mut w = worker();
         let (done, answer) = channel();
-        let mut at = Some(Instant::now());
+        let now = Instant::now();
+        let mut at = Some(now);
         assert!(w.handle(Cmd::Eject(42, done), &mut at).is_none());
         assert!(answer.try_recv().is_ok(), "Windows is told at once");
-        assert!(at.is_none(), "no scan while the disk goes");
+        assert!(
+            at.unwrap() >= now + DEBOUNCE,
+            "a pending scan waits for the removal"
+        );
+        let mut none = None;
+        let (done, _answer) = channel();
+        w.handle(Cmd::Eject(42, done), &mut none);
+        assert!(none.is_none(), "no scan is added");
     }
 
     #[test]

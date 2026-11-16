@@ -181,8 +181,12 @@ jobs:
           if ($p.ExitCode -eq 0 -or (Installed) -ne $current) { throw "downgrade not refused: exit $($p.ExitCode), version $(Installed)" }
           $p = Start-Process $old -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLOWDOWNGRADE', "/LOG=$env:RUNNER_TEMP\downgrade2.log" -Wait -PassThru
           if ($p.ExitCode -ne 0 -or (Installed) -ne '0.0.1') { throw "downgrade failed: exit $($p.ExitCode), version $(Installed)" }
+          # The tray's "Start at sign-in" survives an upgrade.
+          Set-Content -NoNewline "$env:ProgramData\ufsmount\start-at-sign-in" '1'
           $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$env:RUNNER_TEMP\upgrade.log" -Wait -PassThru
           if ($p.ExitCode -ne 0 -or (Installed) -ne $current) { throw "upgrade failed: exit $($p.ExitCode), version $(Installed)" }
+          [xml]$task = schtasks.exe /Query /TN ufsmount-tray /XML
+          if ($null -eq $task.Task.Triggers.LogonTrigger) { throw 'start at sign-in lost on upgrade' }
           $n = @(((PathValue) -split '\|', 2)[1] -split ';' | Where-Object { $_ -eq $app }).Count
           if ($n -ne 1) { throw "PATH has $n ufsmount entries" }
 

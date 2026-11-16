@@ -4,13 +4,19 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use super::task::base_dir;
+use super::task::secure_base_dir;
 
 /// A file system's id from its superblock: it stays the same on any port.
 pub type FsId = [u32; 2];
 
 fn file(name: &str) -> Option<PathBuf> {
-    base_dir().ok().map(|d| d.join(name))
+    match secure_base_dir() {
+        Ok(d) => Some(d.join(name)),
+        Err(e) => {
+            log::warn!("settings: {e:#}");
+            None
+        }
+    }
 }
 
 fn write(name: &str, text: &str) {

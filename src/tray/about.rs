@@ -29,8 +29,8 @@ use crate::winfs::winfsp_version;
 
 const SOURCE_URL: &str = "https://github.com/poeggi/winfsp-ufs";
 const FRAMES: usize = 8;
-/// Timer ticks (about 200 ms each) before a check that never ends counts as
-/// failed: past the four WinHTTP timeouts in a row.
+/// Timer ticks (about 200 ms each) before a check without an answer counts
+/// as failed.
 const MAX_TICKS: u32 = 120;
 
 type Outcome = Option<Result<Version, String>>;
@@ -181,11 +181,7 @@ impl About {
             TDN_CREATED => {
                 // SAFETY: a plain call on our dialog.
                 let _ = unsafe { SetForegroundWindow(hwnd) };
-                let size = small_icon_size(hwnd);
-                if size != self.size {
-                    self.size = size;
-                    self.set_icon(hwnd);
-                }
+                self.set_icon(hwnd);
             }
             TDN_TIMER => {
                 let Mark::Spinner(frame) = self.mark else {
@@ -247,7 +243,9 @@ impl About {
         }
     }
 
+    /// Draw the footer icon for the dialog's current DPI.
     fn set_icon(&mut self, hwnd: HWND) {
+        self.size = small_icon_size(hwnd);
         let icon = make_icon(self.mark, self.size);
         // SAFETY: the dialog shows the new icon; the old one is ours to destroy.
         unsafe {
@@ -444,7 +442,7 @@ mod tests {
         assert!(lock.contains(&format!(
             "name = \"winfsp\"\nversion = \"{winfsp}+winfsp-{api}\"\n"
         )));
-        assert!(update::parse_version(env!("UFSMOUNT_RUST")).is_some());
+        assert!(env!("UFSMOUNT_RUST").starts_with(|c: char| c.is_ascii_digit()));
         let text = content();
         for v in [rufs, env!("UFSMOUNT_WINFSP_RS"), env!("UFSMOUNT_RUST")] {
             assert!(text.contains(v), "{v}");

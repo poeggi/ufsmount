@@ -129,7 +129,14 @@ pub fn check_install_dir() -> anyhow::Result<PathBuf> {
 /// `"1"` or `"0"`: whether the task starts the tray at sign-in. The tray menu
 /// shows it; the setup reads it to keep the choice on an upgrade.
 fn sign_in_file() -> anyhow::Result<PathBuf> {
-    Ok(base_dir()?.join("start-at-sign-in"))
+    Ok(secure_base_dir()?.join("start-at-sign-in"))
+}
+
+/// `<ProgramData>\ufsmount` once it is checked or made admin-only. Files in
+/// it are read and written only then: any user may create that folder.
+pub fn secure_base_dir() -> anyhow::Result<PathBuf> {
+    data_dirs()?;
+    base_dir()
 }
 
 /// Whether the task starts the tray at sign-in. None when not known.

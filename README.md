@@ -49,8 +49,9 @@ Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
 - "Drive letter" in a drive's menu moves it to another letter. The letter is remembered for that file system.
 - "Mount automatically" is on by default. Turned off, found file systems wait under "Not mounted".
   Unmounted ones wait there too. "Mount on" or "Mount as" mounts one.
-- "Start at sign-in" in that menu starts it at every sign-in. The setup has the same choice.
-- About shows the versions and asks GitHub once whether a newer release exists. Nothing is downloaded.
+- "Start at sign-in" in the icon's menu starts it at every sign-in. The setup has the same choice.
+- About shows the versions. Each time it opens, it asks GitHub whether a newer release exists.
+  Nothing is downloaded.
 - Log: `C:\ProgramData\ufsmount\tray\tray.log`.
 
 ## Command line

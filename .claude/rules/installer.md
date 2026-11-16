@@ -39,7 +39,8 @@
   `<ProgramData>\ufsmount\letters`; automatic mounts try it first when it is free.
 - Each mounted disk's handle is registered for removal requests (DBT_DEVTYP_HANDLE). On
   DBT_DEVICEQUERYREMOVE (Eject) the tray unmounts every mount of that disk and closes it before it
-  answers, else the open handle blocks the eject. After 10 s it refuses and mounts the disk again.
+  answers, else the open handle blocks the eject. After 10 s it refuses and scans the disk again
+  (mounted, or listed when "Mount automatically" is off).
   If another program blocks the eject, "Rescan" mounts the disk again.
 - "Start at sign-in" is shown when `start-at-sign-in` can be read; a task changed by hand
   shows wrong until the next toggle or setup run.

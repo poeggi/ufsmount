@@ -283,7 +283,9 @@ begin
     if not HasParamPrefix('/TASKS=') and not HasParamPrefix('/MERGETASKS=') then begin
       if RegKeyExists(HKLM32, '{#LauncherKey}') then
         WizardSelectTasks('launcher');
-      if LoadStringFromFile(ExpandConstant('{commonappdata}\ufsmount\start-at-sign-in'), SignIn) then
+      { Only an installed version has made the folder admin-only. }
+      if RegKeyExists(HKLM64, '{#UninstallKey}') and
+        LoadStringFromFile(ExpandConstant('{commonappdata}\ufsmount\start-at-sign-in'), SignIn) then
         if SignIn = '1' then
           WizardSelectTasks('logon')
         else if SignIn = '0' then

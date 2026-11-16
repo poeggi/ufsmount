@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::ffi::c_void;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::mpsc::{Sender, channel};
@@ -71,17 +72,13 @@ enum Action {
 }
 
 /// Menu commands from `ID_MOUNTS` on, and what each does.
-struct Actions {
-    next: u32,
-    list: Vec<(u32, Action)>,
-}
+struct Actions(Vec<Action>);
 
 impl Actions {
+    /// The menu id for `action`: `ID_MOUNTS` plus its index.
     fn add(&mut self, action: Action) -> usize {
-        let id = self.next;
-        self.next += 1;
-        self.list.push((id, action));
-        id as usize
+        self.0.push(action);
+        ID_MOUNTS as usize + self.0.len() - 1
     }
 }
 
@@ -360,22 +357,27 @@ fn send(cmd: Cmd) {
 
 /// Unmount everything (wait up to `wait`), then close the window.
 fn quit(wait: Duration) {
-    let Some(Some((tx, hwnd))) = with_app(|a| {
-        if a.quitting {
-            None
-        } else {
-            a.quitting = true;
-            Some((a.tx.clone(), a.hwnd))
-        }
-    }) else {
-        return;
+    if stop_worker(wait)
+        && let Some(hwnd) = with_app(|a| a.hwnd)
+    {
+        // SAFETY: our own window.
+        let _ = unsafe { DestroyWindow(hwnd) };
+    }
+}
+
+/// Have the worker unmount everything and end, and wait up to `wait`.
+/// False when that was asked before.
+fn stop_worker(wait: Duration) -> bool {
+    let Some(Some(tx)) =
+        with_app(|a| (!std::mem::replace(&mut a.quitting, true)).then(|| a.tx.clone()))
+    else {
+        return false;
     };
     let (done_tx, done_rx) = channel();
     if tx.send(Cmd::Quit(done_tx)).is_ok() {
         let _ = done_rx.recv_timeout(wait);
     }
-    // SAFETY: our own window.
-    let _ = unsafe { DestroyWindow(hwnd) };
+    true
 }
 
 /// Unmount the disk with `handle` and close it, so Windows may remove it.
@@ -424,11 +426,8 @@ fn show_menu(x: i32, y: i32) {
 }
 
 /// Show the menu; the chosen command (0 for none) and the mount actions.
-fn track_menu(hwnd: HWND, snap: &Snapshot, x: i32, y: i32) -> Option<(u32, Vec<(u32, Action)>)> {
-    let mut actions = Actions {
-        next: ID_MOUNTS,
-        list: Vec::new(),
-    };
+fn track_menu(hwnd: HWND, snap: &Snapshot, x: i32, y: i32) -> Option<(u32, Vec<Action>)> {
+    let mut actions = Actions(Vec::new());
     let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
     // SAFETY: menu handles are created and destroyed here; strings live through each call.
     let cmd = unsafe {
@@ -502,21 +501,27 @@ fn track_menu(hwnd: HWND, snap: &Snapshot, x: i32, y: i32) -> Option<(u32, Vec<(
         let _ = DestroyMenu(menu);
         cmd
     };
-    Some((cmd, actions.list))
+    Some((cmd, actions.0))
 }
 
-fn act(hwnd: HWND, cmd: u32, actions: Vec<(u32, Action)>) {
+fn act(hwnd: HWND, cmd: u32, actions: Vec<Action>) {
     match cmd {
         0 => {}
         ID_RESCAN => send(Cmd::Rescan { manual: true }),
         ID_ABOUT => {
             if with_app(|a| std::mem::replace(&mut a.about_open, true)) == Some(false) {
-                about::show(hwnd);
+                // A panic must not unwind into the window procedure.
+                if catch_unwind(AssertUnwindSafe(|| about::show(hwnd))).is_err() {
+                    log::error!("about box: internal error");
+                }
                 with_app(|a| a.about_open = false);
             }
         }
         ID_QUIT => quit(Duration::from_secs(15)),
-        id => match actions.into_iter().find(|a| a.0 == id).map(|a| a.1) {
+        id => match id
+            .checked_sub(ID_MOUNTS)
+            .and_then(|i| actions.into_iter().nth(i as usize))
+        {
             Some(Action::Open(letter)) => {
                 if let Err(e) = open_unelevated(&format!("{letter}\\")) {
                     log::warn!("open {letter}: {e:#}");
@@ -767,21 +772,7 @@ pub fn run(inst: Instance, source: Option<PathBuf>, sd: SecurityDescriptor) -> E
     }
 
     // Not quit through the menu or the event: unmount now.
-    let pending = with_app(|a| {
-        if a.quitting {
-            None
-        } else {
-            a.quitting = true;
-            Some(a.tx.clone())
-        }
-    })
-    .flatten();
-    if let Some(tx) = pending {
-        let (done_tx, done_rx) = channel();
-        if tx.send(Cmd::Quit(done_tx)).is_ok() {
-            let _ = done_rx.recv_timeout(Duration::from_secs(15));
-        }
-    }
+    stop_worker(Duration::from_secs(15));
     // SAFETY: our own event; the waiter ends on it before the handles close.
     unsafe {
         let _ = SetEvent(stop);

@@ -34,6 +34,11 @@
   objects, `<ProgramData>\<product>`, `SOFTWARE\<product>`, the menu's "No <fs> disks".
 - The UI thread runs the window, icon and menu. One worker thread does all disk work.
 - Calls that can dispatch messages (Shell_NotifyIconW, menus, message boxes) run outside `with_app`.
+- Scans the `PhysicalDriveN` and `CdRomN` names QueryDosDevice lists, any number; PhysicalDrive0-31 if
+  that fails. Drive arrivals come through the disk and CD-ROM interface classes, discs as volume arrivals
+  with DBTF_MEDIA (a drive without a letter gets none: Rescan). A disc without UFS, or with read errors,
+  is probed again only on such a media arrival or Rescan; a disc not ready yet is retried.
+  Optical drives are untested on hardware.
 - Mounts every file system found, at most 8. Letters: the product's first letter (ufsmount: U:), then
   U: down to D:, skipping letters in use and the session user's network mappings (`HKEY_USERS\<SID>\Network`).
 - Each worker command runs under `catch_unwind`; a panic becomes an "Internal error" note.

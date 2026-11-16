@@ -76,6 +76,8 @@ pub struct Found {
     pub size: u64,
     /// For the backend's `open`.
     pub block_size: u32,
+    /// Which file system of a container, for the backend's `open`; 0 for a plain one.
+    pub volume: u32,
     /// One line for `probe`.
     pub summary: String,
 }
@@ -92,13 +94,15 @@ pub enum FsKind {
 pub trait Backend: Sync {
     /// The places to check, most specific first: the same start offset is
     /// checked once. `table` holds the GPT partitions (`p<n>`), MBR slices
-    /// (`s<n>`) and the whole disk (`whole`).
+    /// (`s<n>`, logical ones from `s5`), Apple Partition Map entries (`m<n>`)
+    /// and the whole disk (`whole`); [`Candidate::table`] tells which.
     fn candidates(&self, _dev: &Device, _sector: u64, table: Vec<Candidate>) -> Vec<Candidate> {
         table
     }
 
-    /// What the bytes from `start` hold. The file system must fit on the disk.
-    fn probe(&self, dev: &Arc<Device>, start: u64, len: u64) -> FsKind;
+    /// What `cand` holds: usually nothing or one file system; a container (such
+    /// as APFS) may hold several. The file systems must fit on the disk.
+    fn probe(&self, dev: &Arc<Device>, cand: &Candidate) -> Vec<FsKind>;
 
     /// Open what `probe` found at `cand`.
     fn open(

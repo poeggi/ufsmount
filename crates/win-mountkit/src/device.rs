@@ -13,13 +13,14 @@ use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE};
+use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE, QueryDosDeviceW};
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::{
     DISK_GEOMETRY_EX, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
     IOCTL_DISK_GET_LENGTH_INFO,
 };
+use windows::core::PCWSTR;
 
 /// Size of a cache chunk. A multiple of every sector size in use.
 pub const CHUNK: u64 = 64 * 1024;
@@ -134,35 +135,97 @@ impl RawDisk for OsDisk {
     }
 }
 
+/// A disk of the system, by its device name. Any bus: SATA, NVMe, USB, iSCSI, ...
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Disk {
+    /// `\\.\PhysicalDriveN`
+    Drive(u32),
+    /// `\\.\CdRomN`, an optical drive.
+    CdRom(u32),
+}
+
+impl Disk {
+    /// Parse `PhysicalDriveN` or `CdRomN`, any case, N with 1 to 3 digits.
+    fn parse(name: &str) -> Option<Disk> {
+        let number = |prefix| {
+            strip_prefix_ci(name, prefix)
+                .filter(|n| !n.is_empty() && n.len() <= 3 && n.bytes().all(|b| b.is_ascii_digit()))
+                .map(|n| n.parse().unwrap())
+        };
+        number("PhysicalDrive")
+            .map(Disk::Drive)
+            .or_else(|| number("CdRom").map(Disk::CdRom))
+    }
+
+    pub fn path(self) -> String {
+        format!(r"\\.\{self}")
+    }
+}
+
+impl std::fmt::Display for Disk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Disk::Drive(n) => write!(f, "PhysicalDrive{n}"),
+            Disk::CdRom(n) => write!(f, "CdRom{n}"),
+        }
+    }
+}
+
+/// The disks and optical drives of the system, in order, also those without
+/// a medium. Falls back to PhysicalDrive0 to 31 if the system cannot list them.
+pub fn disks() -> Vec<Disk> {
+    let mut size = 1 << 16;
+    let err = loop {
+        let mut buf = vec![0u16; size];
+        // SAFETY: the buffer is passed with its length.
+        let n = unsafe { QueryDosDeviceW(PCWSTR::null(), Some(&mut buf)) } as usize;
+        if n > 0 {
+            let mut out: Vec<Disk> = buf[..n]
+                .split(|&c| c == 0)
+                .filter_map(|s| Disk::parse(&String::from_utf16_lossy(s)))
+                .collect();
+            out.sort_unstable();
+            out.dedup();
+            return out;
+        }
+        // SAFETY: no arguments.
+        let err = unsafe { GetLastError() };
+        if err != ERROR_INSUFFICIENT_BUFFER || size >= 1 << 22 {
+            break err;
+        }
+        size *= 2;
+    };
+    log::warn!(
+        "cannot list the disks: {}",
+        io::Error::from_raw_os_error(err.0 as i32)
+    );
+    (0..32).map(Disk::Drive).collect()
+}
+
 /// Where the data comes from, as given by the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    /// `\\.\PhysicalDriveN`
-    PhysicalDrive(u32),
+    Disk(Disk),
     /// An image file.
     Image(std::path::PathBuf),
 }
 
 impl Source {
-    /// Parse `PhysicalDriveN`, `\\.\PhysicalDriveN` or an image path.
+    /// Parse `PhysicalDriveN`, `CdRomN`, either with `\\.\`, or an image path.
     pub fn parse(s: &str) -> Source {
         let bare = s
             .strip_prefix(r"\\.\")
             .or_else(|| s.strip_prefix(r"\\?\"))
             .unwrap_or(s);
-        if let Some(n) = strip_prefix_ci(bare, "PhysicalDrive")
-            && !n.is_empty()
-            && n.len() <= 3
-            && n.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Source::PhysicalDrive(n.parse().unwrap());
+        match Disk::parse(bare) {
+            Some(d) => Source::Disk(d),
+            None => Source::Image(s.into()),
         }
-        Source::Image(s.into())
     }
 
     pub fn path(&self) -> String {
         match self {
-            Source::PhysicalDrive(n) => format!(r"\\.\PhysicalDrive{n}"),
+            Source::Disk(d) => d.path(),
             Source::Image(p) => p.display().to_string(),
         }
     }
@@ -271,7 +334,7 @@ impl Device {
             .open(&path)
             .map_err(|e| {
                 if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
-                    && matches!(source, Source::PhysicalDrive(_))
+                    && matches!(source, Source::Disk(_))
                 {
                     anyhow::anyhow!(
                         "{path}: access denied. Raw disk access needs administrator rights."
@@ -280,7 +343,7 @@ impl Device {
                     anyhow::anyhow!("{path}: {e}")
                 }
             })?;
-        let is_disk = matches!(source, Source::PhysicalDrive(_)) || file.metadata()?.len() == 0;
+        let is_disk = matches!(source, Source::Disk(_)) || file.metadata()?.len() == 0;
         let (len, io_sector) = if is_disk {
             disk_geometry(&file)
                 .map_err(|e| anyhow::anyhow!("{path}: cannot query the size: {e}"))?
@@ -837,12 +900,31 @@ mod tests {
 
     #[test]
     fn source_parse() {
-        assert_eq!(Source::parse("PhysicalDrive1"), Source::PhysicalDrive(1));
+        assert_eq!(
+            Source::parse("PhysicalDrive1"),
+            Source::Disk(Disk::Drive(1))
+        );
         assert_eq!(
             Source::parse(r"\\.\physicaldrive12"),
-            Source::PhysicalDrive(12)
+            Source::Disk(Disk::Drive(12))
         );
-        assert!(matches!(Source::parse("PhysicalDrive"), Source::Image(_)));
-        assert!(matches!(Source::parse("disk.img"), Source::Image(_)));
+        assert_eq!(Source::parse(r"\\.\CdRom0"), Source::Disk(Disk::CdRom(0)));
+        assert_eq!(Source::Disk(Disk::CdRom(3)).path(), r"\\.\CdRom3");
+        for image in [
+            "PhysicalDrive",
+            "PhysicalDrive1234",
+            "CdRom",
+            "CdRom1x",
+            "disk.img",
+        ] {
+            assert!(matches!(Source::parse(image), Source::Image(_)), "{image}");
+        }
+    }
+
+    #[test]
+    fn disks_are_listed() {
+        let disks = disks();
+        assert!(disks.contains(&Disk::Drive(0)), "{disks:?}");
+        assert!(disks.is_sorted());
     }
 }

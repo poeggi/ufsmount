@@ -36,7 +36,8 @@ Raw disk reads and global drive letters need admin rights. The tray and the laun
 ## Mounts and the WinFsp launcher
 - File security: read for SYSTEM, Administrators and the session user.
   `--sddl` is validated: owner and group present, at most 1024 bytes.
-- Launcher instance names must match `^\\<class>\\PhysicalDrive[0-9]{1,3}(s[1-4]([a-t])?|p[0-9]{1,3})?\\?$`,
+- Launcher instance names must match
+  `^\\<class>\\PhysicalDrive[0-9]{1,3}((whole|[a-t]|[spm][0-9]{1,3}[a-t]?)(v[0-9]{1,3})?)?\\?$`,
   `<class>` being the product's launcher class (ufsmount: `ufs`).
   A `-U` user that does not resolve stops the start. Never fall back to a wider security descriptor.
 - Product names (id, launcher class) are `[a-z0-9][a-z0-9-]{0,31}`, checked by `set_product`: they reach
@@ -52,5 +53,7 @@ Raw disk reads and global drive letters need admin rights. The tray and the laun
   that is empty, `.`, `..` or holds a separator.
 - `cp` copies each directory once (a second visit means a loop) and at most 512 levels deep, on its own
   16 MiB stack. It holds at most 4,000,000 entries over all levels.
+- Tables: at most 256 GPT partitions, 128 logical slices and 256 APM entries; at most 1024 places
+  checked per sector size.
 - A directory listing stops past 1,000,000 entries or 256 MiB of names.
   A directory larger than 1 GiB or the file system is refused (the latter by rufs).

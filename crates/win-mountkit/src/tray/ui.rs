@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromWindow};
-use windows::Win32::System::Ioctl::GUID_DEVINTERFACE_DISK;
+use windows::Win32::System::Ioctl::{GUID_DEVINTERFACE_CDROM, GUID_DEVINTERFACE_DISK};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects};
 use windows::Win32::UI::HiDpi::{
@@ -28,8 +28,8 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BROADCAST_QUERY_DENY, CW_USEDEFAULT, ChangeWindowMessageFilterEx, CreatePopupMenu,
     CreateWindowExW, DBT_DEVICEARRIVAL, DBT_DEVICEQUERYREMOVE, DBT_DEVICEREMOVECOMPLETE,
-    DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_HANDLE, DBT_DEVTYP_VOLUME,
-    DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR,
+    DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_HANDLE, DBT_DEVTYP_VOLUME, DBTF_MEDIA,
+    DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR, DEV_BROADCAST_VOLUME,
     DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
     DispatchMessageW, FindWindowW, GetMessageW, HICON, HMENU, IMAGE_ICON, KillTimer,
     LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
@@ -608,7 +608,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if event == DBT_DEVICEARRIVAL
                     && (kind == DBT_DEVTYP_DEVICEINTERFACE || kind == DBT_DEVTYP_VOLUME)
                 {
-                    send(Cmd::Arrived);
+                    // SAFETY: for a volume, lparam points to a DEV_BROADCAST_VOLUME.
+                    let media = kind == DBT_DEVTYP_VOLUME
+                        && unsafe { (*(lparam.0 as *const DEV_BROADCAST_VOLUME)).dbcv_flags }.0
+                            & DBTF_MEDIA.0
+                            != 0;
+                    send(Cmd::Arrived { media });
                 } else if event == DBT_DEVICEREMOVECOMPLETE && kind == DBT_DEVTYP_DEVICEINTERFACE {
                     send(Cmd::Removed);
                 }
@@ -678,22 +683,26 @@ fn create_window() -> anyhow::Result<HWND> {
     }
 }
 
+/// Disks and optical drives that come and go. A disc put into a drive comes
+/// as a volume arrival, which every top-level window gets.
 fn watch_devices(hwnd: HWND) {
-    let filter = DEV_BROADCAST_DEVICEINTERFACE_W {
-        dbcc_size: size_of::<DEV_BROADCAST_DEVICEINTERFACE_W>() as u32,
-        dbcc_devicetype: DBT_DEVTYP_DEVICEINTERFACE.0,
-        dbcc_classguid: GUID_DEVINTERFACE_DISK,
-        ..Default::default()
-    };
-    // SAFETY: filter lives through the call; the registration lasts as long as the window.
-    if let Err(e) = unsafe {
-        RegisterDeviceNotificationW(
-            HANDLE(hwnd.0),
-            (&filter as *const DEV_BROADCAST_DEVICEINTERFACE_W).cast::<c_void>(),
-            DEVICE_NOTIFY_WINDOW_HANDLE,
-        )
-    } {
-        log::warn!("no device notifications: {e}");
+    for class in [GUID_DEVINTERFACE_DISK, GUID_DEVINTERFACE_CDROM] {
+        let filter = DEV_BROADCAST_DEVICEINTERFACE_W {
+            dbcc_size: size_of::<DEV_BROADCAST_DEVICEINTERFACE_W>() as u32,
+            dbcc_devicetype: DBT_DEVTYP_DEVICEINTERFACE.0,
+            dbcc_classguid: class,
+            ..Default::default()
+        };
+        // SAFETY: filter lives through the call; the registration lasts as long as the window.
+        if let Err(e) = unsafe {
+            RegisterDeviceNotificationW(
+                HANDLE(hwnd.0),
+                (&filter as *const DEV_BROADCAST_DEVICEINTERFACE_W).cast::<c_void>(),
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            )
+        } {
+            log::warn!("no device notifications: {e}");
+        }
     }
 }
 

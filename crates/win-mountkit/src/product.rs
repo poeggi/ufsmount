@@ -32,8 +32,8 @@ pub struct Product {
     pub license: &'static str,
     /// Log target of the file system code; the tray logs it from warnings on.
     pub quiet_log: &'static str,
-    /// GPT partition types shown by name, the GUID in on-disk (mixed-endian) order.
-    pub gpt_types: &'static [([u8; 16], &'static str)],
+    /// GPT partition types shown by name: (lower-case GUID, name).
+    pub gpt_types: &'static [(&'static str, &'static str)],
     pub backend: &'static dyn Backend,
 }
 
@@ -75,8 +75,8 @@ pub mod tests {
     struct NoFs;
 
     impl Backend for NoFs {
-        fn probe(&self, _: &Arc<crate::device::Device>, _: u64, _: u64) -> FsKind {
-            FsKind::None
+        fn probe(&self, _: &Arc<crate::device::Device>, _: &Candidate) -> Vec<FsKind> {
+            Vec::new()
         }
 
         fn open(

@@ -51,7 +51,7 @@ struct Cli {
 
 #[derive(Args)]
 struct Disk {
-    /// PhysicalDriveN, \\.\PhysicalDriveN or an image file.
+    /// PhysicalDriveN, CdRomN or an image file.
     source: String,
 
     /// Partition id as shown by `probe` (s1a, p2, whole, ...).
@@ -89,7 +89,7 @@ impl Disk {
 enum Command {
     /// List the partitions and file systems on a disk.
     Probe {
-        /// PhysicalDriveN, \\.\PhysicalDriveN or an image file.
+        /// PhysicalDriveN, CdRomN or an image file.
         source: String,
         #[arg(long)]
         sector_size: Option<u32>,

@@ -54,6 +54,18 @@ Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
   Nothing is downloaded.
 - Log: `C:\ProgramData\ufsmount\tray\tray.log`.
 
+## Disks
+
+- Any disk Windows sees: SATA, eSATA, NVMe, USB disks and sticks, card readers, iSCSI.
+- Optical drives too, not yet tested on real hardware.
+- Sectors of 512 or 4096 bytes, 2048 on discs.
+- A disk partitioned with 512-byte sectors works behind a 4096-byte USB bridge, and the other way round.
+- File systems from FreeBSD, NetBSD (FFSv2, FFSv2ea) and OpenBSD.
+- GPT and MBR partitions, also logical MBR partitions.
+- BSD labels in an MBR or GPT partition, or at the disk start.
+- Apple Partition Maps (PowerPC Macs).
+- A file system without any partition table.
+
 ## Command line
 
 Use an elevated prompt. The setup adds the folder to PATH.
@@ -66,6 +78,7 @@ ufsmount cp PhysicalDrive1 /home/me D:\backup
 ```
 
 - `Get-Disk` shows the disk number. `probe` lists partitions and UFS file systems.
+- Optical drives are `CdRom0`, `CdRom1` and so on.
 - `mount` keeps U: until Ctrl+C or until the window closes.
 - `--part s1a` picks a partition when a disk has several.
 - An image file works in place of the disk: `ufsmount mount disk.img U:`.
@@ -79,6 +92,7 @@ net use U: /delete
 ```
 
 - Run `register` once. All three need an elevated prompt.
+- The launcher takes disks (`PhysicalDriveN`), not optical drives.
 - `register` needs `ufsmount.exe` under `C:\Program Files`, as the setup installs it.
 - Windows keeps `net use` drives per logon.
   Explorer does not see a drive mapped in an elevated prompt. Use `mount` for that.
@@ -86,6 +100,7 @@ net use U: /delete
 ## Limits
 
 - Read-only. UFS1 is not supported.
+- Not read: DragonFly's disklabel64, geli (encrypted), gconcat, gstripe, gvinum.
 - A file system that was not unmounted cleanly is read as is.
 - A bad sector fails only the files that use it.
 - Names Windows cannot show (`:`, `?`, invalid UTF-8, ...) map to private-use characters.

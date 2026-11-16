@@ -27,7 +27,13 @@ pub static PRODUCT: Product = Product {
     https://github.com/realchonk/fuse-ufs",
     license: "AGPL-3.0-or-later",
     quiet_log: "rufs",
-    gpt_types: &[(ufs::GPT_FREEBSD_UFS, "freebsd-ufs")],
+    gpt_types: &[
+        ("516e7cb6-6ecf-11d6-8ff8-00022d09712b", "freebsd-ufs"),
+        ("516e7cb4-6ecf-11d6-8ff8-00022d09712b", "freebsd, BSD label"),
+        ("49f48d5a-b10e-11dc-b99b-0019d1879648", "netbsd-ffs"),
+        ("824cc7a0-36a8-11e3-890a-952519ad3f61", "openbsd, BSD label"),
+        ("55465300-0000-11aa-aa11-00306543ecac", "apple-ufs"),
+    ],
     backend: &ufs::Ufs,
 };
 

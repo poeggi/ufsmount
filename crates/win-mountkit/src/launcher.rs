@@ -14,7 +14,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
-use crate::device::{Device, Source, strip_prefix_ci};
+use crate::device::{Device, Disk, Source, strip_prefix_ci};
 use crate::names::Charset;
 use crate::partition;
 use crate::product::product;
@@ -40,8 +40,32 @@ pub struct Instance {
     pub part: Option<String>,
 }
 
+fn number(s: &[u8]) -> bool {
+    (1..=3).contains(&s.len()) && s.iter().all(u8::is_ascii_digit)
+}
+
+/// A partition id as `probe` shows it: `whole`, a label letter `a`..`t`, or
+/// `s<n>`, `p<n>`, `m<n>` with an optional label letter; each with an
+/// optional `v<n>` (one of several file systems in one place).
+fn valid_part(part: &[u8]) -> bool {
+    let base = match part.iter().rposition(|&b| b == b'v') {
+        Some(i) if number(&part[i + 1..]) => &part[..i],
+        _ => part,
+    };
+    let letter = |l: &u8| (b'a'..=b't').contains(l);
+    match base {
+        b"whole" => true,
+        [l] => letter(l),
+        [b's' | b'p' | b'm', rest @ ..] => match rest.split_last() {
+            Some((l, n)) if letter(l) => number(n),
+            _ => number(rest),
+        },
+        _ => false,
+    }
+}
+
 /// Accept only `\<class>\PhysicalDrive<n>` with an optional partition id
-/// (`s1`..`s4`, `s1a`..`s4t`, `p<n>`), any case, an optional trailing `\`.
+/// (see [`valid_part`]), any case, an optional trailing `\`.
 pub fn parse_prefix(class: &str, prefix: &str) -> anyhow::Result<Instance> {
     let bad = || anyhow::anyhow!("invalid volume prefix \"{prefix}\"");
     let trimmed = prefix.strip_suffix('\\').unwrap_or(prefix);
@@ -53,15 +77,7 @@ pub fn parse_prefix(class: &str, prefix: &str) -> anyhow::Result<Instance> {
     }
     let drive: u32 = rest[..digits].parse().map_err(|_| bad())?;
     let part = rest[digits..].to_ascii_lowercase();
-    let b = part.as_bytes();
-    let ok = match b {
-        [] => true,
-        [b's', n] => (b'1'..=b'4').contains(n),
-        [b's', n, l] => (b'1'..=b'4').contains(n) && (b'a'..=b't').contains(l),
-        [b'p', n @ ..] => (1..=3).contains(&n.len()) && n.iter().all(u8::is_ascii_digit),
-        _ => false,
-    };
-    if !ok {
+    if !part.is_empty() && !valid_part(part.as_bytes()) {
         return Err(bad());
     }
     Ok(Instance {
@@ -94,7 +110,7 @@ pub fn run_service(
         let sd = SecurityDescriptor::read_only_for(&sid)?;
         log::info!("{} for {user} ({sid}) on {mountpoint:?}", inst.prefix);
 
-        let dev = Arc::new(Device::open(&Source::PhysicalDrive(inst.drive), None)?);
+        let dev = Arc::new(Device::open(&Source::Disk(Disk::Drive(inst.drive)), None)?);
         let cands = partition::probe(&dev);
         let cand = partition::select(&cands, inst.part.as_deref())?;
         let vol = Arc::new(Volume::open(dev.clone(), cand, Charset::Utf8)?);
@@ -193,7 +209,7 @@ mod tests {
 
     #[test]
     fn prefixes() {
-        let parse = |p| parse_prefix("demo", p);
+        let parse = |p: &str| parse_prefix("demo", p);
         let p = parse(r"\demo\PhysicalDrive1").unwrap();
         assert_eq!((p.drive, p.part), (1, None));
         let p = parse(r"\DEMO\physicaldrive12S1A\").unwrap();
@@ -203,12 +219,29 @@ mod tests {
             parse(r"\demo\PhysicalDrive0p2").unwrap().part.as_deref(),
             Some("p2")
         );
+        for part in [
+            "whole", "a", "t", "s1", "s132", "s1a", "s6t", "p2", "p128d", "m3", "m3a", "s1v2",
+            "p1av12", "wholev1", "av3",
+        ] {
+            let p = parse(&format!(r"\demo\PhysicalDrive3{part}")).unwrap();
+            assert_eq!(p.part.as_deref(), Some(part));
+        }
         for bad in [
             r"\demo\PhysicalDrive",
             r"\demo\PhysicalDrive1234",
-            r"\demo\PhysicalDrive1s5",
             r"\demo\PhysicalDrive1s1u",
+            r"\demo\PhysicalDrive1s1234",
+            r"\demo\PhysicalDrive1sa",
+            r"\demo\PhysicalDrive1s1ab",
+            r"\demo\PhysicalDrive1u",
+            r"\demo\PhysicalDrive1v1",
+            r"\demo\PhysicalDrive1s1v",
+            r"\demo\PhysicalDrive1s1v1234",
+            r"\demo\PhysicalDrive1s1v1v1",
+            r"\demo\PhysicalDrive1whol",
             r"\demo\PhysicalDrive1x",
+            r"\demo\PhysicalDrive1x1",
+            r"\demo\PhysicalDrive1p1.",
             r"\other\PhysicalDrive1",
             r"\demo\..\PhysicalDrive1",
             r"\demo\PhysicalDrive1\..",

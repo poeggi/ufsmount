@@ -283,13 +283,20 @@ end;
   Only an installed version has made its folder admin-only. }
 function InstalledSignIn: String;
 var
+  Path: String;
   S: AnsiString;
 begin
   Result := '';
-  if RegKeyExists(HKLM64, '{#UninstallKey}') then
-    if LoadStringFromFile(ExpandConstant('{commonappdata}\ufsmount\start-at-sign-in'), S) then
-      if (S = '1') or (S = '0') then
-        Result := S;
+  if not RegKeyExists(HKLM64, '{#UninstallKey}') then
+    exit;
+  Path := ExpandConstant('{commonappdata}\ufsmount\start-at-sign-in');
+  if not LoadStringFromFile(Path, S) then begin
+    Log('Start at sign-in: cannot read ' + Path);
+    exit;
+  end;
+  if (S = '1') or (S = '0') then
+    Result := S;
+  Log('Start at sign-in of the installed version: "' + S + '"');
 end;
 
 { A task as chosen. A silent install without tasks on the command line

@@ -29,7 +29,7 @@
   background and a white drive with black "U:".
 - The setup is unsigned: SmartScreen warns, Smart App Control blocks it.
 
-## Tray (`crates/winfsp-mount/src/tray`)
+## Tray (`crates/win-mountkit/src/tray`)
 - Names and texts come from the product: `<product>-tray` task and window class, `Global\<product>-tray`
   objects, `<ProgramData>\<product>`, `SOFTWARE\<product>`, the menu's "No <fs> disks".
 - The UI thread runs the window, icon and menu. One worker thread does all disk work.

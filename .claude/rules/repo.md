@@ -5,7 +5,7 @@ Write support is not a feature. UFS1 is not supported (rufs has no UFS1).
 
 ## Layout
 A Cargo workspace. Shared code names no product; each product changes only its own folder.
-- `crates/winfsp-mount/` shared: disk access, partition tables, the volume layer, WinFsp, launcher, `cp`,
+- `crates/win-mountkit/` shared: disk access, partition tables, the volume layer, WinFsp, launcher, `cp`,
   CLI (`cli.rs`), tray (`tray/`). `product.rs` is the `Product` struct, `fs.rs` the `Backend`/`Fs` traits.
 - `products/ufsmount/` ufsmount: `src/lib.rs` (`PRODUCT`: names, URLs, texts), `src/ufs.rs` (UFS through rufs:
   BSD labels, superblock), the two thin exes, `build.rs` (icon, manifest, link flags), `installer.iss` (defines),

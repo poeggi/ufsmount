@@ -754,7 +754,7 @@ mod tests {
         // folder therefore never counts as admin-only.
         let me = current_user_sid().unwrap();
         let sddl = format!("O:{me}G:{me}D:P(A;OICI;FA;;;{me})");
-        let base = std::env::temp_dir().join(format!("winfsp-mount-secure-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("win-mountkit-secure-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir(&base).unwrap();
 
@@ -856,7 +856,7 @@ mod tests {
         let me = current_user_sid().unwrap();
         let sd =
             SecurityDescriptor::from_sddl(&format!("O:{me}G:{me}D:P(A;OICI;FA;;;{me})")).unwrap();
-        let base = std::env::temp_dir().join(format!("winfsp-mount-setsec-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("win-mountkit-setsec-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir(&base).unwrap();
         let child = base.join("child");

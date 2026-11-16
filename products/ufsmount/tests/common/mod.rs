@@ -4,10 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use winfsp_mount::device::{Device, Source};
-use winfsp_mount::names::Charset;
-use winfsp_mount::partition;
-use winfsp_mount::volume::Volume;
+use win_mountkit::device::{Device, Source};
+use win_mountkit::names::Charset;
+use win_mountkit::partition;
+use win_mountkit::volume::Volume;
 
 pub const IMAGES: [&str; 2] = ["ufs-little", "ufs-big"];
 

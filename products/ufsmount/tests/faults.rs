@@ -4,11 +4,11 @@
 mod common;
 
 use common::*;
-use winfsp_mount::device::device_error;
-use winfsp_mount::device::testing::FakeDisk;
-use winfsp_mount::names::Charset;
-use winfsp_mount::partition;
-use winfsp_mount::volume::{Error, Volume};
+use win_mountkit::device::device_error;
+use win_mountkit::device::testing::FakeDisk;
+use win_mountkit::names::Charset;
+use win_mountkit::partition;
+use win_mountkit::volume::{Error, Volume};
 
 const ERROR_CRC: u32 = 23;
 
@@ -108,10 +108,10 @@ fn with_dir3_entry(patch: impl FnOnce(&mut [u8], usize, [u8; 4])) -> Volume {
     volume(FakeDisk::new(img, 512))
 }
 
-fn cp_dir1(vol: &Volume, tag: &str) -> (winfsp_mount::copy::Stats, std::path::PathBuf) {
+fn cp_dir1(vol: &Volume, tag: &str) -> (win_mountkit::copy::Stats, std::path::PathBuf) {
     let out = temp_path(tag);
     std::fs::create_dir_all(&out).unwrap();
-    let stats = winfsp_mount::copy::cp(vol, "/dir1", &out).unwrap();
+    let stats = win_mountkit::copy::cp(vol, "/dir1", &out).unwrap();
     (stats, out)
 }
 
@@ -166,21 +166,21 @@ fn cp_tree() {
     let out = temp_path("cp-out");
     std::fs::create_dir_all(&out).unwrap();
 
-    let stats = winfsp_mount::copy::cp(&vol, "/dir1", &out).unwrap();
+    let stats = win_mountkit::copy::cp(&vol, "/dir1", &out).unwrap();
     assert_eq!((stats.files, stats.dirs, stats.failed), (1, 3, 0));
     assert_eq!(
         std::fs::read(out.join(r"dir1\dir2\dir3\file2")).unwrap(),
         b"Hello World\n"
     );
 
-    let stats = winfsp_mount::copy::cp(&vol, "/link1", &out.join("via-link")).unwrap();
+    let stats = win_mountkit::copy::cp(&vol, "/link1", &out.join("via-link")).unwrap();
     assert_eq!(stats.files, 1, "a symlink source is followed");
     assert_eq!(
         std::fs::read(out.join("via-link")).unwrap(),
         b"Hello World\n"
     );
 
-    let stats = winfsp_mount::copy::cp(&vol, "dir1/../file1", &out.join("nul")).unwrap();
+    let stats = win_mountkit::copy::cp(&vol, "dir1/../file1", &out.join("nul")).unwrap();
     assert_eq!(stats.files, 1);
     assert_eq!(
         std::fs::read(format!(r"\\?\{}\nul", out.display())).unwrap(),

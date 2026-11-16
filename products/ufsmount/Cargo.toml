@@ -12,7 +12,7 @@ publish.workspace = true
 anyhow.workspace = true
 log.workspace = true
 rufs = { path = "../../vendor/fuse-ufs/rufs" }
-winfsp-mount = { path = "../../crates/winfsp-mount" }
+win-mountkit = { path = "../../crates/win-mountkit" }
 
 [dev-dependencies]
 crc32fast.workspace = true

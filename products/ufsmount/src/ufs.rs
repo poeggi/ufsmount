@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use rufs::{BlockReader, InodeNum, InodeType};
-use winfsp_mount::device::{Device, PartitionReader};
-use winfsp_mount::fs::{Backend, Found, Fs, FsKind, Info, Kind, NodeId, Stat};
-use winfsp_mount::partition::{Candidate, clamp, human_size, le16, le32, read};
-use winfsp_mount::volume::{describe, filetime};
+use win_mountkit::device::{Device, PartitionReader};
+use win_mountkit::fs::{Backend, Found, Fs, FsKind, Info, Kind, NodeId, Stat};
+use win_mountkit::partition::{Candidate, clamp, human_size, le16, le32, read};
+use win_mountkit::volume::{describe, filetime};
 
 const SBLOCK_UFS2: u64 = 65536;
 const SBLOCK_UFS1: u64 = 8192;

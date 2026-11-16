@@ -108,7 +108,7 @@ ISCC /DAppVersion=<version> products\ufsmount\installer.iss
 The setup goes to `temp\installer`. `UFSMOUNT_MOUNT_TEST=1` enables the WinFsp mount tests.
 
 The code is in two parts.
-`crates/winfsp-mount` is the shared part: disks, WinFsp, the command line and the tray.
+`crates/win-mountkit` is the shared part: disks, WinFsp, the command line and the tray.
 It names no file system.
 `products/ufsmount` holds the UFS code, the names, texts, logo and setup settings.
 Another read-only file system could reuse the shared part with its own product folder.

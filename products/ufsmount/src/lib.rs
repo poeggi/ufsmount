@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! ufsmount: FreeBSD UFS2 disks read-only on Windows. This crate holds what is
-//! UFS or ufsmount; the rest is the shared winfsp-mount.
+//! UFS or ufsmount; the rest is the shared win-mountkit.
 
 mod ufs;
 
-pub use winfsp_mount;
-use winfsp_mount::Product;
+pub use win_mountkit;
+use win_mountkit::Product;
 
 pub static PRODUCT: Product = Product {
     id: "ufsmount",
@@ -33,7 +33,7 @@ pub static PRODUCT: Product = Product {
 
 /// Set this product for the shared code. Every exe and test calls it first.
 pub fn init() {
-    winfsp_mount::set_product(&PRODUCT);
+    win_mountkit::set_product(&PRODUCT);
 }
 
 #[cfg(test)]

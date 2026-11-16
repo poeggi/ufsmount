@@ -219,16 +219,16 @@ fn mount_stop_releases_device() {
         return;
     }
     let _lock = one_at_a_time();
-    winfsp_mount::winfs::load_winfsp().unwrap();
+    win_mountkit::winfs::load_winfsp().unwrap();
     let path = write_temp("mount-api", &image_bytes(IMAGES[0]));
     let (vol, _) = open(&path, None);
     let dev = vol.device().clone();
-    let sid = winfsp_mount::security::current_user_sid().unwrap();
-    let sd = winfsp_mount::security::SecurityDescriptor::read_only_for(&sid).unwrap();
+    let sid = win_mountkit::security::current_user_sid().unwrap();
+    let sd = win_mountkit::security::SecurityDescriptor::read_only_for(&sid).unwrap();
     let letter = free_letter_in('G'..='L');
     let target = format!("{letter}:");
     let mut m =
-        winfsp_mount::winfs::Mount::start(Arc::new(vol), sd, None, Some(&target), false).unwrap();
+        win_mountkit::winfs::Mount::start(Arc::new(vol), sd, None, Some(&target), false).unwrap();
     assert_eq!(m.shown(), target);
     assert_eq!(
         fs::read(format!(r"{letter}:\file1")).unwrap(),

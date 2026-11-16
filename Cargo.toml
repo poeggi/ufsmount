@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/winfsp-mount", "products/ufsmount"]
+members = ["crates/win-mountkit", "products/ufsmount"]
 exclude = ["vendor"]
 resolver = "3"
 

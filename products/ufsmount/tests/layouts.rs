@@ -163,15 +163,15 @@ fn explicit_part_and_errors() {
     assert_eq!(id, "s1a");
 
     let dev = std::sync::Arc::new(
-        winfsp_mount::device::Device::open(
-            &winfsp_mount::device::Source::Image(path.to_path_buf()),
+        win_mountkit::device::Device::open(
+            &win_mountkit::device::Source::Image(path.to_path_buf()),
             None,
         )
         .unwrap(),
     );
-    let cands = winfsp_mount::partition::probe(&dev);
-    assert!(winfsp_mount::partition::select(&cands, Some("s1")).is_err());
-    assert!(winfsp_mount::partition::select(&cands, Some("p9")).is_err());
+    let cands = win_mountkit::partition::probe(&dev);
+    assert!(win_mountkit::partition::select(&cands, Some("s1")).is_err());
+    assert!(win_mountkit::partition::select(&cands, Some("p9")).is_err());
 }
 
 #[test]
@@ -181,13 +181,13 @@ fn not_clean() {
     let path = write_temp("dirty", &img);
     let (vol, _) = open(&path, None);
     let dev = std::sync::Arc::new(
-        winfsp_mount::device::Device::open(
-            &winfsp_mount::device::Source::Image(path.to_path_buf()),
+        win_mountkit::device::Device::open(
+            &win_mountkit::device::Source::Image(path.to_path_buf()),
             None,
         )
         .unwrap(),
     );
-    let cands = winfsp_mount::partition::probe(&dev);
+    let cands = win_mountkit::partition::probe(&dev);
     let found = cands.iter().find_map(|c| c.found()).unwrap();
     assert!(found.summary.contains("NOT clean"), "{}", found.summary);
     assert_eq!(root_names(&vol), ROOT_NAMES);

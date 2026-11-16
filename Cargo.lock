@@ -734,8 +734,8 @@ dependencies = [
  "crc32fast",
  "log",
  "rufs",
+ "win-mountkit",
  "windows 0.62.2",
- "winfsp-mount",
  "winresource",
  "zstd",
 ]
@@ -775,6 +775,20 @@ name = "widestring"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
+name = "win-mountkit"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crc32fast",
+ "env_logger",
+ "log",
+ "thiserror",
+ "windows 0.62.2",
+ "winfsp",
+]
 
 [[package]]
 name = "windows"
@@ -999,20 +1013,6 @@ dependencies = [
  "windows 0.61.3",
  "windows 0.62.2",
  "winfsp-sys",
-]
-
-[[package]]
-name = "winfsp-mount"
-version = "0.4.1"
-dependencies = [
- "anyhow",
- "clap",
- "crc32fast",
- "env_logger",
- "log",
- "thiserror",
- "windows 0.62.2",
- "winfsp",
 ]
 
 [[package]]

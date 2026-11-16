@@ -4,10 +4,10 @@
 mod common;
 
 use common::*;
-use winfsp_mount::fs::Kind;
-use winfsp_mount::volume::Error;
+use win_mountkit::fs::Kind;
+use win_mountkit::volume::Error;
 
-fn each_image(f: impl Fn(&str, &winfsp_mount::volume::Volume)) {
+fn each_image(f: impl Fn(&str, &win_mountkit::volume::Volume)) {
     for name in IMAGES {
         let path = write_temp(name, &image_bytes(name));
         let (vol, id) = open(&path, None);

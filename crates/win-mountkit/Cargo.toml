@@ -1,5 +1,5 @@
 [package]
-name = "winfsp-mount"
+name = "win-mountkit"
 description = "Read-only file systems on Windows through WinFsp: disks, mounts, tray, command line"
 version.workspace = true
 edition.workspace = true

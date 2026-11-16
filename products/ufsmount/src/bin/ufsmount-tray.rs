@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The tray app. See `winfsp_mount::tray`.
+//! The tray app. See `win_mountkit::tray`.
 #![windows_subsystem = "windows"]
 
 fn main() -> std::process::ExitCode {
     ufsmount::init();
-    ufsmount::winfsp_mount::tray::main()
+    ufsmount::win_mountkit::tray::main()
 }

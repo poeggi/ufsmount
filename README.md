@@ -46,7 +46,7 @@ Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
 - Every UFS2 file system is mounted: U: first, then T:, S: and so on.
 - Plugging in a disk mounts it. Unplugging unmounts it.
 - "Eject" (Safely Remove Hardware) works on a mounted disk: it is unmounted first.
-- Right-click the icon: Open or Unmount a drive, Rescan disks, Quit (unmounts all).
+- Right-click the icon: Open or Unmount a drive, Rescan disks, Quit (unmounts all; asks first while a drive is mounted).
 - "Drive letter" in a drive's menu moves it to another letter. The letter is remembered for that file system.
 - "Mount automatically" is on by default. Turned off, found file systems wait under "Not mounted".
   Unmounted ones wait there too. "Mount on" or "Mount as" mounts one.

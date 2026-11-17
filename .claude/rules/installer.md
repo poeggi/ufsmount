@@ -67,6 +67,9 @@
   answers, else the open handle blocks the eject. After 10 s it refuses and scans the disk again
   (mounted, or listed when "Mount automatically" is off).
   If another program blocks the eject, "Rescan" mounts the disk again.
+- The menu's Quit unmounts everything. While a drive is mounted it asks first (TaskDialog, OK and Cancel,
+  Cancel the default). The quit event (the setup) and session end never ask. While the question is up,
+  a click on the icon brings it to the front instead of opening the menu.
 - "Start at sign-in" is shown when `start-at-sign-in` can be read; a task changed by hand
   shows wrong until the next toggle or setup run.
 - About is a TaskDialog (Common Controls 6 via the manifest; comctl32.dll is delay-loaded, so

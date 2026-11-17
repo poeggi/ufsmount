@@ -12,11 +12,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, S_OK, WPARAM};
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromWindow};
 use windows::Win32::System::Ioctl::{GUID_DEVINTERFACE_CDROM, GUID_DEVINTERFACE_DISK};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects};
+use windows::Win32::UI::Controls::{
+    TASKDIALOG_NOTIFICATIONS, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TD_WARNING_ICON,
+    TDCBF_CANCEL_BUTTON, TDCBF_OK_BUTTON, TDN_CREATED, TaskDialogIndirect,
+};
 use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, GetDpiForSystem, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI,
 };
@@ -31,20 +35,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_HANDLE, DBT_DEVTYP_VOLUME, DBTF_MEDIA,
     DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR, DEV_BROADCAST_VOLUME,
     DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
-    DispatchMessageW, FindWindowW, GetMessageW, HICON, HMENU, IMAGE_ICON, KillTimer,
-    LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    MF_UNCHECKED, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
+    DispatchMessageW, FindWindowW, GetMessageW, HICON, HMENU, IDCANCEL, IDOK, IMAGE_ICON,
+    KillTimer, LR_DEFAULTCOLOR, LoadImageW, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
+    MF_STRING, MF_UNCHECKED, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
     RegisterDeviceNotificationW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow,
     SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
     WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_ENDSESSION, WM_NULL, WM_QUERYENDSESSION, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{HRESULT, HSTRING, PCWSTR, w};
 
 use super::about;
 use super::instance::Instance;
 use super::sys::open_unelevated;
-use super::worker::{self, Cmd, Shared, Snapshot};
+use super::worker::{self, Cmd, MountView, Shared, Snapshot};
 use crate::product::product;
 use crate::security::SecurityDescriptor;
 
@@ -122,6 +126,8 @@ struct App {
     quitting: bool,
     menu_open: bool,
     about_open: bool,
+    /// Set while the Quit question is up; its window once created.
+    quit_question: Option<HWND>,
 }
 
 thread_local! {
@@ -367,6 +373,90 @@ fn quit(wait: Duration) {
     }
 }
 
+/// Whether the menu's Quit goes on: while a drive is mounted, only after OK.
+/// The menu does not open while the question is up.
+fn confirm_quit(hwnd: HWND) -> bool {
+    let Some(mounts) = with_app(|a| {
+        let snap = a.shared.snap.lock().unwrap_or_else(|e| e.into_inner());
+        snap.mounts.clone()
+    }) else {
+        return false;
+    };
+    if mounts.is_empty() {
+        return true;
+    }
+    with_app(|a| a.quit_question = Some(HWND::default()));
+    // A panic must not unwind into the window procedure.
+    let ok = catch_unwind(AssertUnwindSafe(|| ask_quit(hwnd, &mounts))).unwrap_or_else(|_| {
+        log::error!("quit question: internal error");
+        false
+    });
+    with_app(|a| a.quit_question = None);
+    ok
+}
+
+/// Ask before Quit unmounts `mounts`. True for OK.
+fn ask_quit(owner: HWND, mounts: &[MountView]) -> bool {
+    let id = product().id;
+    let window_title = HSTRING::from(id);
+    let title = HSTRING::from(format!("Quit {id}?"));
+    let text = HSTRING::from(quit_text(mounts));
+    let config = TASKDIALOGCONFIG {
+        cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
+        hwndParent: owner,
+        dwCommonButtons: TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON,
+        pszWindowTitle: PCWSTR(window_title.as_ptr()),
+        Anonymous1: TASKDIALOGCONFIG_0 {
+            pszMainIcon: TD_WARNING_ICON,
+        },
+        pszMainInstruction: PCWSTR(title.as_ptr()),
+        pszContent: PCWSTR(text.as_ptr()),
+        nDefaultButton: IDCANCEL.0,
+        pfCallback: Some(to_front),
+        ..Default::default()
+    };
+    let mut button = 0;
+    // SAFETY: the strings and `button` outlive the modal call.
+    match unsafe { TaskDialogIndirect(&config, Some(&raw mut button), None, None) } {
+        Ok(()) => button == IDOK.0,
+        Err(e) => {
+            log::error!("quit question: {e}");
+            false
+        }
+    }
+}
+
+unsafe extern "system" fn to_front(
+    hwnd: HWND,
+    msg: TASKDIALOG_NOTIFICATIONS,
+    _wparam: WPARAM,
+    _lparam: LPARAM,
+    _data: isize,
+) -> HRESULT {
+    if msg == TDN_CREATED {
+        with_app(|a| a.quit_question = Some(hwnd));
+        // SAFETY: a plain call on the dialog.
+        let _ = unsafe { SetForegroundWindow(hwnd) };
+    }
+    S_OK
+}
+
+fn quit_text(mounts: &[MountView]) -> String {
+    let (these, them) = if mounts.len() == 1 {
+        ("this drive", "it")
+    } else {
+        ("these drives", "them")
+    };
+    let list: Vec<String> = mounts
+        .iter()
+        .map(|m| format!("    {}   {}", m.letter, m.label))
+        .collect();
+    format!(
+        "Quitting unmounts {these}:\n{}\n\nPrograms still using files on {them} lose access.",
+        list.join("\n")
+    )
+}
+
 /// Have the worker unmount everything and end, and wait up to `wait`.
 /// False when that was asked before.
 fn stop_worker(wait: Duration) -> bool {
@@ -403,6 +493,14 @@ fn eject(handle: usize) -> bool {
 /// The menu at `x`, `y` (the icon's anchor). Not reentrant: one click can
 /// bring more than one notification.
 fn show_menu(x: i32, y: i32) {
+    // While the Quit question is up, a click brings it to the front instead.
+    if let Some(Some(question)) = with_app(|a| a.quit_question) {
+        if !question.is_invalid() {
+            // SAFETY: a plain call; a closed dialog only makes it fail.
+            let _ = unsafe { SetForegroundWindow(question) };
+        }
+        return;
+    }
     let Some(Some((hwnd, snap))) = with_app(|a| {
         if a.menu_open {
             return None;
@@ -520,7 +618,11 @@ fn act(hwnd: HWND, cmd: u32, actions: Vec<Action>) {
                 with_app(|a| a.about_open = false);
             }
         }
-        ID_QUIT => quit(Duration::from_secs(15)),
+        ID_QUIT => {
+            if confirm_quit(hwnd) {
+                quit(Duration::from_secs(15));
+            }
+        }
         id => match id
             .checked_sub(ID_MOUNTS)
             .and_then(|i| actions.into_iter().nth(i as usize))
@@ -755,6 +857,7 @@ pub fn run(inst: Instance, source: Option<PathBuf>, sd: SecurityDescriptor) -> E
             quitting: false,
             menu_open: false,
             about_open: false,
+            quit_question: None,
         })
     });
     if !add_icon() {
@@ -836,7 +939,27 @@ fn spawn_event_waiter(hwnd: HWND, inst: &Instance, stop: HANDLE) -> JoinHandle<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tray::worker::MountView;
+
+    #[test]
+    fn quit_texts() {
+        let mount = |letter: &str, label: &str| MountView {
+            id: 1,
+            letter: letter.into(),
+            label: label.into(),
+        };
+        let mut mounts = vec![mount("U:", "PhysicalDrive1 s1a")];
+        assert_eq!(
+            quit_text(&mounts),
+            "Quitting unmounts this drive:\n    U:   PhysicalDrive1 s1a\n\n\
+             Programs still using files on it lose access."
+        );
+        mounts.push(mount("T:", "PhysicalDrive2 p1"));
+        assert_eq!(
+            quit_text(&mounts),
+            "Quitting unmounts these drives:\n    U:   PhysicalDrive1 s1a\n    \
+             T:   PhysicalDrive2 p1\n\nPrograms still using files on them lose access."
+        );
+    }
 
     #[test]
     fn tooltips() {

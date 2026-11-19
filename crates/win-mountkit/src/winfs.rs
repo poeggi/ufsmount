@@ -38,9 +38,9 @@ use crate::product::product;
 use crate::security::{SecurityDescriptor, current_user_sid, is_elevated};
 use crate::volume::{self, Attr, Node, Volume};
 
-/// Oldest WinFsp accepted: 2.2.26286 (2026 Beta5). Older builds have kernel
+/// Oldest WinFsp accepted: 2.2.26323 (WinFsp 2026). Older builds have known
 /// vulnerabilities, among them CVE-2026-3006.
-pub const MIN_WINFSP: (u32, u32, u32) = (2, 2, 26286);
+pub const MIN_WINFSP: (u32, u32, u32) = (2, 2, 26323);
 
 const IO_REPARSE_TAG_SYMLINK: u32 = 0xa000_000c;
 const SYMLINK_FLAG_RELATIVE: u32 = 1;
@@ -537,7 +537,7 @@ fn winfsp_dll() -> anyhow::Result<HSTRING> {
     )))
 }
 
-/// The version of the installed WinFsp, such as "2.2.26286".
+/// The version of the installed WinFsp, such as "2.2.26323".
 pub fn winfsp_version() -> anyhow::Result<String> {
     let (major, minor, build, _) = file_version(&winfsp_dll()?)?;
     Ok(format!("{major}.{minor}.{build}"))

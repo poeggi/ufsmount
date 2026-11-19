@@ -17,8 +17,8 @@ The command-line tool alone:
 ## Requirements
 
 - Windows 10 or 11, x64, an administrator account.
-- [WinFsp](https://github.com/winfsp/winfsp/releases) 2.2.26286 (2026 Beta5) or later.
-  Older versions have kernel vulnerabilities (CVE-2026-3006 and others).
+- [WinFsp](https://github.com/winfsp/winfsp/releases) 2.2.26323 (WinFsp 2026) or later.
+  Older versions have known vulnerabilities (CVE-2026-3006 and others).
   The setup downloads and installs it if needed.
   Before it updates WinFsp, it asks if other WinFsp drives are mounted: the update closes them.
 

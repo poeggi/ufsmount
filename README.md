@@ -50,6 +50,7 @@ Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
 
 - Start: Start menu > ufsmount. The icon appears in the notification area.
   Windows may hide it behind the arrow (^) in the notification area.
+  To keep it visible: Settings > Personalization > Taskbar > Other system tray icons > "ufsmount tray".
 - The user who ran the setup gets no UAC prompt. Other accounts get one.
 - Every UFS2 file system is mounted: U: first, then T:, S: and so on.
 - Plugging in a disk mounts it. Unplugging unmounts it.

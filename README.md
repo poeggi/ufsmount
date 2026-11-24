@@ -24,10 +24,8 @@ The command-line tool alone:
 
 - Windows 11 or Windows Server 2025, x64, an administrator account.
   Older versions may work but are not tested.
-- [WinFsp](https://github.com/winfsp/winfsp/releases) 2.2.26323 (WinFsp 2026) or later.
-  Older versions have known vulnerabilities (CVE-2026-3006 and others).
-  The setup downloads and installs it if needed.
-  Before it updates WinFsp, it asks if other WinFsp drives are mounted: the update closes them.
+- [WinFsp](https://github.com/winfsp/winfsp/releases) 2.2.26323 (2026-11-19) or later.
+  The setup installs it if it is missing or older.
 
 ## Install
 

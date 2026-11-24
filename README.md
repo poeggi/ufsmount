@@ -2,8 +2,14 @@
 
 <img src="products/ufsmount/logos/logo.svg" width="96" alt="ufsmount logo">
 
-Mount a FreeBSD UFS2 disk on Windows as a read-only drive.
-Explorer, copy and robocopy work as on any drive.
+A Windows app that mounts FreeBSD UFS2 disks as read-only drives.
+Plug in a disk and it shows up in Explorer, by default as U:.
+Copy and robocopy work as on any drive.
+
+It shows this icon in the notification area, next to the clock:
+<img src="products/ufsmount/logos/logo-small.svg" width="32" alt="The ufsmount tray icon">
+
+A command-line tool comes with it.
 
 Proven on real hardware: a 500 GB FreeBSD UFS2 USB disk with soft updates.
 Its whole tree (about 20,000 files, 108 GB) lists correctly.
@@ -16,7 +22,8 @@ The command-line tool alone:
 
 ## Requirements
 
-- Windows 10 or 11, x64, an administrator account.
+- Windows 11 or Windows Server 2025, x64, an administrator account.
+  Older versions may work but are not tested.
 - [WinFsp](https://github.com/winfsp/winfsp/releases) 2.2.26323 (WinFsp 2026) or later.
   Older versions have known vulnerabilities (CVE-2026-3006 and others).
   The setup downloads and installs it if needed.
@@ -42,6 +49,7 @@ Uninstall: Settings > Apps > ufsmount. WinFsp stays installed.
 ## Start and stop
 
 - Start: Start menu > ufsmount. The icon appears in the notification area.
+  Windows may hide it behind the arrow (^) in the notification area.
 - The user who ran the setup gets no UAC prompt. Other accounts get one.
 - Every UFS2 file system is mounted: U: first, then T:, S: and so on.
 - Plugging in a disk mounts it. Unplugging unmounts it.

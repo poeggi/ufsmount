@@ -12,7 +12,7 @@ repository = "https://github.com/poeggi/ufsmount"
 publish = false
 
 [workspace.dependencies]
-anyhow = "1.0.104"
+anyhow = "1.0.105"
 clap = { version = "4.6.9", features = ["derive"] }
 crc32fast = "1.5.5"
 env_logger = "0.11.12"
